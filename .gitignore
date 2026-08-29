@@ -19,3 +19,6 @@ dist/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# WorkBuddy session data
+.workbuddy/
