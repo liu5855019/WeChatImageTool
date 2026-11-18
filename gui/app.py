@@ -206,6 +206,12 @@ class WeiXinImageToolGUI:
         if not folder:
             self._log("请先设置图片保存文件夹", "error")
             return
+        try:
+            file_ops.ensure_folder(folder)
+        except OSError as e:
+            self._log(f"无法创建或访问保存文件夹：{folder}（{e}）", "error")
+            self._log("请点「浏览」选择有写入权限的目录，例如桌面或 D 盘。", "warning")
+            return
 
         naming = self._build_naming_from_ui()
 
@@ -271,8 +277,12 @@ class WeiXinImageToolGUI:
             ).pack(fill="x", padx=6, pady=3)
 
     def _run_download(self, downloader):
-        downloader.run()
-        self.root.after(0, self._on_download_done)
+        try:
+            downloader.run()
+        except Exception as e:
+            self._log(f"下载异常终止：{type(e).__name__}: {e}", "error")
+        finally:
+            self.root.after(0, self._on_download_done)
 
     def _on_download_done(self):
         self.btn_download.configure(state="normal")
