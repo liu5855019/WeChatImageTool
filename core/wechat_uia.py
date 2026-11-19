@@ -330,25 +330,33 @@ def _viewer_control(auto, hwnd):
         return None
 
 
-def is_next_disabled(hwnd):
-    """查看器「下一张」按钮是否已禁用（即已到最后一张）。
+def is_nav_disabled(hwnd, direction='right'):
+    """查看器导航按钮是否已禁用（即已到达当前方向的边界）。
 
+    direction='right' 检查「下一张」按钮（已到最后一张）；
+    direction='left'  检查「上一张」按钮（已到第一张）。
     读不到时返回 False，让下载流程照常继续，不因识别失败而中断。
     """
     auto = _load_uia()
     if auto is None or not hwnd:
         return False
+    button_name = '上一张' if direction == 'left' else '下一张'
     try:
         _ensure_thread(auto)
         viewer = _viewer_control(auto, hwnd)
         if viewer is None:
             return False
-        button = _find_button(viewer, '下一张')
+        button = _find_button(viewer, button_name)
         if button is None:
             return False
         return not bool(button.IsEnabled)
     except Exception:
         return False
+
+
+def is_next_disabled(hwnd):
+    """兼容旧调用：等价于 is_nav_disabled(hwnd, 'right')"""
+    return is_nav_disabled(hwnd, 'right')
 
 
 def set_watcher_logger(cb):

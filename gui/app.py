@@ -23,6 +23,7 @@ from core.wechat_uia import (
 
 NAMING_PRESETS = ['1001起序', '0001起序', '1起序', '日期+序号', '自定义']
 MODE_MAP = {'剪贴板复制': 'clipboard', 'Ctrl+S 接管对话框': 'ctrl_s'}
+DIRECTIONS = ['向右', '向左']
 
 
 class WeiXinImageToolGUI:
@@ -36,6 +37,7 @@ class WeiXinImageToolGUI:
         self.var_img_folder = tk.StringVar(value=config.DEFAULTS['image_folder'])
         self.var_count = tk.StringVar(value=str(config.DEFAULTS['download_count']))
         self.var_dl_mode = tk.StringVar(value='剪贴板复制')  # '剪贴板复制' | 'Ctrl+S 接管对话框'
+        self.var_direction = tk.StringVar(value=config.DEFAULTS['nav_direction'])  # 向右 / 向左
         self.var_naming_preset = tk.StringVar(value='1001起序')
         self.var_name_prefix = tk.StringVar(value='')
         self.var_name_start = tk.StringVar(value='1')
@@ -147,6 +149,21 @@ class WeiXinImageToolGUI:
             border_width=1, border_color="#D1D5DB",
             fg_color="#3B82F6", hover_color="#2563EB",
         ).pack(side="left", padx=(16, 0))
+
+        # 切图方向：向右从当前张往后下载，向左从当前张往前下载
+        dir_row = ctk.CTkFrame(card_dl.body, fg_color="transparent")
+        dir_row.pack(fill="x", pady=(0, 6))
+        ctk.CTkLabel(dir_row, text="切图方向", font=ctk.CTkFont(size=12),
+                     text_color="#6B7280").pack(side="left", padx=(0, 6))
+        ctk.CTkOptionMenu(
+            dir_row, values=DIRECTIONS, variable=self.var_direction,
+            width=90, height=32, corner_radius=6, fg_color="#F3F4F6",
+            button_color="#E5E7EB", text_color="#374151",
+            dropdown_fg_color="#FFFFFF",
+        ).pack(side="left")
+        ctk.CTkLabel(dir_row, text="向右=往后下载 / 向左=往前下载",
+                     font=ctk.CTkFont(size=11), text_color="#9CA3AF", anchor="w").pack(
+            side="left", padx=(10, 0))
 
         # 选择微信窗口（放在「开始下载」之前）
         pick_row = ctk.CTkFrame(card_dl.body, fg_color="transparent")
@@ -277,7 +294,7 @@ class WeiXinImageToolGUI:
         dl_mode = MODE_MAP.get(self.var_dl_mode.get(), 'clipboard')
         downloader = WeChatDownloader(
             image_folder=folder, count=count, wechat_save_src=config.DEFAULTS['wechat_save_src'],
-            next_key=config.DEFAULTS['next_key'], naming=naming,
+            direction=self.var_direction.get(), naming=naming,
             log_cb=self._log, stop_event=self.stop_event, selected_hwnd=self.selected_hwnd,
             mode=dl_mode, use_chat_folder=self.var_chat_folder.get()
         )

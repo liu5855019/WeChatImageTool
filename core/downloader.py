@@ -17,7 +17,7 @@ import config
 from config import IMAGE_EXTS
 from core import file_ops
 from core.naming import NamingScheme, compute_start
-from core.wechat_uia import get_chat_info, sanitize_folder_name, is_next_disabled
+from core.wechat_uia import get_chat_info, sanitize_folder_name, is_nav_disabled
 
 
 def list_visible_windows(exclude_hwnd=None):
@@ -43,14 +43,19 @@ class WeChatDownloader:
       3. 循环：Ctrl+S -> 监控目录中新文件 -> 重命名 1001.jpg -> 方向键切下一张
     """
 
+    DIRECTION_KEYS = {'向右': 'right', '向左': 'left'}
+
     def __init__(self, image_folder, count, wechat_save_src=None,
-                 next_key='right', naming=None, start_index=1001, log_cb=None, stop_event=None,
+                 direction='向右', naming=None, start_index=1001, log_cb=None, stop_event=None,
                  selected_hwnd=None, mode='ctrl_s', use_chat_folder=True):
         self.image_folder = image_folder
         self.base_image_folder = image_folder
         self.count = count
         self.wechat_save_src = wechat_save_src  # 可选：微信默认保存目录
-        self.next_key = next_key
+        # 切图方向同时决定按哪个方向键、以及检查哪个导航按钮是否到边界
+        self.direction = direction if direction in self.DIRECTION_KEYS else '向右'
+        self.next_key = self.DIRECTION_KEYS[self.direction]
+        self.nav_dir = 'left' if self.direction == '向左' else 'right'
         self.naming = naming or NamingScheme.from_preset('1001起序')
         self.start_index = start_index
         self.log = log_cb or (lambda msg, level="info": None)
@@ -682,13 +687,14 @@ class WeChatDownloader:
                     self.log(f"第 {i+1} 张保存失败：微信未聚焦或默认保存目录不可访问，已停止", "error")
                     break
 
-            # 自动结束：查看器「下一张」按钮被禁用说明已到最后一张，不再切图
+            # 自动结束：导航按钮被禁用说明已到当前方向的边界，不再切图
+            boundary = '第一张' if self.direction == '向左' else '最后一张'
             try:
-                if is_next_disabled(hwnd):
+                if is_nav_disabled(hwnd, self.nav_dir):
                     # Qt 状态可能晚一拍，短间隔再确认一次，避免误停
                     time.sleep(0.2)
-                    if is_next_disabled(hwnd):
-                        self.log("已是最后一张，自动结束", "success")
+                    if is_nav_disabled(hwnd, self.nav_dir):
+                        self.log(f"已是{boundary}，自动结束", "success")
                         break
             except Exception:
                 pass

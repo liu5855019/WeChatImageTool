@@ -92,7 +92,7 @@ DEFAULTS = {
     'image_folder': default_image_folder(),
     'download_count': 10,
     'wechat_save_src': default_wechat_src(),  # 监控来源（微信默认保存目录）
-    'next_key': 'right',            # 切下一张所用按键
+    'nav_direction': '向右',        # 切图方向：向右 / 向左（向左用于从中间往前下载）
 }
 
 # 支持的媒体扩展名（微信「图片和视频」查看器也能复制 mp4 等视频）
