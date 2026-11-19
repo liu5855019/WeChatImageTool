@@ -74,6 +74,7 @@ def default_wechat_src():
     """探测微信默认保存目录，兼容 3.x / 4.x 及自定义安装位置"""
     home = _home_dir()
     candidates = [
+        os.path.join(home, 'xwechat_files'),
         os.path.join(home, 'Documents', 'WeChat Files'),
         os.path.join(home, 'Documents', 'xwechat_files'),
         os.path.join(home, 'Documents', 'WeChat Files', 'xwechat_files'),

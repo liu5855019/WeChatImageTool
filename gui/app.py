@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
 """主界面：构建窗口、卡片、日志区，并绑定核心逻辑（后台线程）"""
 
+import queue
 import threading
 import tkinter as tk
 import customtkinter as ctk
+import win32con
+import win32gui
 
 import config
 from gui.utils import create_button, hide_console, ScrolledText
@@ -12,6 +15,7 @@ from gui.widgets import SectionCard, browse_row, labeled_field
 from core import file_ops
 from core.downloader import WeChatDownloader, list_visible_windows
 from core.naming import NamingScheme
+from core.wechat_uia import get_chat_info, start_viewer_watcher
 
 
 NAMING_PRESETS = ['1001起序', '0001起序', '1起序', '日期+序号', '自定义']
@@ -33,17 +37,32 @@ class WeiXinImageToolGUI:
         self.var_name_prefix = tk.StringVar(value='')
         self.var_name_start = tk.StringVar(value='1')
         self.var_name_digits = tk.StringVar(value='3')
+        self.var_chat_folder = tk.BooleanVar(value=True)   # 按微信会话建子文件夹
         self.selected_hwnd = None                      # 用户手动选择的微信窗口句柄
         self.var_target_window = tk.StringVar(value="未选择")
 
         self.stop_event = threading.Event()
         self.worker = None
+        self._log_queue = queue.Queue()
 
         self._build_ui()
+        # 后台监视查看器：在窗口出现瞬间捕获「会话 ID -> 群名」，避免主窗口切换后误判
+        start_viewer_watcher(log_cb=self._log)
+        self._drain_log_queue()
 
     def _log(self, msg, level="info"):
-        # 从后台线程经主线程写入，保证 tkinter 线程安全
-        self.root.after(0, self.logger.log, msg, level)
+        """任意线程可调用；先入队，再由主线程定时写入 Text，保证 tkinter 线程安全"""
+        self._log_queue.put((msg, level))
+
+    def _drain_log_queue(self):
+        """主线程定时消费日志队列"""
+        try:
+            while True:
+                msg, level = self._log_queue.get_nowait()
+                self.logger.log(msg, level)
+        except queue.Empty:
+            pass
+        self.root.after(100, self._drain_log_queue)
 
     def _build_ui(self):
         # 主区恢复普通容器（不用可滚动，避免滚动条；窗口加高即可容纳全部内容）
@@ -114,6 +133,14 @@ class WeiXinImageToolGUI:
                           width=160, height=32, corner_radius=6, fg_color="#F3F4F6",
                           button_color="#E5E7EB", text_color="#374151",
                           dropdown_fg_color="#FFFFFF").pack(side="left")
+        ctk.CTkCheckBox(
+            mode_row, text="按会话建子文件夹（自动识别群名/联系人名）",
+            variable=self.var_chat_folder,
+            font=ctk.CTkFont(size=11), text_color="#6B7280",
+            checkbox_width=18, checkbox_height=18, corner_radius=4,
+            border_width=1, border_color="#D1D5DB",
+            fg_color="#3B82F6", hover_color="#2563EB",
+        ).pack(side="left", padx=(16, 0))
 
         # 选择微信窗口（放在「开始下载」之前）
         pick_row = ctk.CTkFrame(card_dl.body, fg_color="transparent")
@@ -229,14 +256,20 @@ class WeiXinImageToolGUI:
             image_folder=folder, count=count, wechat_save_src=config.DEFAULTS['wechat_save_src'],
             next_key=config.DEFAULTS['next_key'], naming=naming,
             log_cb=self._log, stop_event=self.stop_event, selected_hwnd=self.selected_hwnd,
-            mode=dl_mode
+            mode=dl_mode, use_chat_folder=self.var_chat_folder.get()
         )
         self.worker = threading.Thread(target=self._run_download, args=(downloader,), daemon=True)
         self.worker.start()
 
     def _pick_window(self):
         """弹出模态列表，让用户从可见窗口中点选微信图片查看器"""
-        wins = list_visible_windows(exclude_hwnd=self.root.winfo_id())
+        try:
+            self_hwnd = win32gui.GetAncestor(self.root.winfo_id(), win32con.GA_ROOT)
+        except Exception:
+            self_hwnd = self.root.winfo_id()
+        wins = list_visible_windows(exclude_hwnd=self_hwnd)
+        # 微信查看器排最前，其次标题含「微信」的窗口，方便快速定位
+        wins.sort(key=lambda item: 0 if item[1] == '图片和视频' else (1 if '微信' in item[1] else 2))
         dlg = ctk.CTkToplevel(self.root)
         dlg.title("选择微信窗口")
         dlg.geometry("440x380")
@@ -264,6 +297,7 @@ class WeiXinImageToolGUI:
                 self.selected_hwnd = hwnd
                 self.var_target_window.set(title[:60])
                 self._log(f"已选择窗口：{title[:40]}", "success")
+                self._log_chat_hint(hwnd)
                 dlg.destroy()
             return _choose
 
@@ -275,6 +309,25 @@ class WeiXinImageToolGUI:
                 text_color="#374151", border_color="#E5E7EB", border_width=1,
                 command=make_choose(hwnd, title)
             ).pack(fill="x", padx=6, pady=3)
+
+    def _log_chat_hint(self, hwnd):
+        """显示已缓存的会话名，不在这里读取当前聊天，避免名称漂移"""
+        try:
+            info = get_chat_info(hwnd)
+        except Exception:
+            return
+        if not info:
+            return
+        if not info.get('name'):
+            self._log(
+                "已识别查看器会话 ID，但名称尚未捕获；请重新打开该图片查看器后再下载，"
+                "以便自动记录群名。",
+                "warning",
+            )
+            return
+        kind = '群聊' if info.get('is_group') else '联系人'
+        suffix = '，下载时按会话建子文件夹' if self.var_chat_folder.get() else ''
+        self._log(f"已识别会话：{info['name']}（{kind}）{suffix}", "success")
 
     def _run_download(self, downloader):
         try:

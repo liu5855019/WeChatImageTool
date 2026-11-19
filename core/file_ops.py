@@ -13,20 +13,27 @@ def ensure_folder(path):
 
 
 def clear_folder(folder):
-    """删除文件夹内所有图片文件，返回删除数量"""
+    """递归删除文件夹内所有图片文件，返回删除数量；顺手清理空子目录"""
     if not os.path.isdir(folder):
         return 0
     count = 0
-    for name in os.listdir(folder):
-        ext = os.path.splitext(name)[1].lower()
-        if ext in IMAGE_EXTS:
-            full = os.path.join(folder, name)
+    for dirpath, _dirnames, filenames in os.walk(folder, topdown=False):
+        for name in filenames:
+            ext = os.path.splitext(name)[1].lower()
+            if ext not in IMAGE_EXTS:
+                continue
+            full = os.path.join(dirpath, name)
             try:
                 if os.path.isfile(full):
                     os.remove(full)
                     count += 1
             except Exception:
                 # 跳过无法删除的文件
+                pass
+        if os.path.abspath(dirpath) != os.path.abspath(folder):
+            try:
+                os.rmdir(dirpath)  # 仅当目录已空时才会成功
+            except OSError:
                 pass
     return count
 

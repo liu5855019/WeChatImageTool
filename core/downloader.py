@@ -17,6 +17,7 @@ import config
 from config import IMAGE_EXTS
 from core import file_ops
 from core.naming import NamingScheme, compute_start
+from core.wechat_uia import get_chat_info, sanitize_folder_name
 
 
 def list_visible_windows(exclude_hwnd=None):
@@ -44,8 +45,9 @@ class WeChatDownloader:
 
     def __init__(self, image_folder, count, wechat_save_src=None,
                  next_key='right', naming=None, start_index=1001, log_cb=None, stop_event=None,
-                 selected_hwnd=None, mode='ctrl_s'):
+                 selected_hwnd=None, mode='ctrl_s', use_chat_folder=True):
         self.image_folder = image_folder
+        self.base_image_folder = image_folder
         self.count = count
         self.wechat_save_src = wechat_save_src  # 可选：微信默认保存目录
         self.next_key = next_key
@@ -55,6 +57,8 @@ class WeChatDownloader:
         self.stop_event = stop_event or threading.Event()
         self.selected_hwnd = selected_hwnd  # 用户手动选择的微信窗口句柄
         self.mode = mode  # 'ctrl_s' | 'clipboard'
+        self.use_chat_folder = use_chat_folder  # 是否按微信会话名建子文件夹
+        self.chat_name = ''
         self.window_title = config.GUI_CONF.get('window_title', '微信图片下载工具')
         self._last_src = None  # 上一张成功保存的剪贴板源路径（用于排除残留）
         self.active_hwnd = None  # 实际用于置顶/聚焦的微信窗口句柄
@@ -460,7 +464,8 @@ class WeChatDownloader:
                 return False, None, None
 
             # 每次尝试前重新抢回微信窗口焦点，避免焦点漂移导致 Ctrl+C 落空
-            focus_hwnd = self.selected_hwnd or self.active_hwnd
+            # active_hwnd 可能是自动纠正后的图片查看器，优先于用户手选的窗口
+            focus_hwnd = self.active_hwnd or self.selected_hwnd
             if focus_hwnd:
                 try:
                     win32gui.ShowWindow(focus_hwnd, win32con.SW_RESTORE)
@@ -502,8 +507,67 @@ class WeChatDownloader:
 
         return False, None, None
 
+    def _apply_chat_folder(self, hwnd):
+        """读取当前微信会话名，把保存目录切到同名子文件夹。
+
+        识别失败时保持原目录不变，不影响下载主流程。
+        返回最终用于置顶/聚焦的窗口句柄（可能自动纠正为查看器窗口）。
+        """
+        if not hwnd:
+            self.log("没有捕获到微信窗口，无法识别会话，图片保存到原目录", "warning")
+            return hwnd
+        try:
+            info = get_chat_info(hwnd)
+        except Exception as e:
+            self.log(f"识别微信会话失败：{e}，图片保存到原目录", "warning")
+            return hwnd
+
+        if not info:
+            self.log("未识别到微信图片查看器会话，图片保存到原目录", "warning")
+            return hwnd
+
+        viewer_hwnd = info.get('viewer_hwnd')
+        if viewer_hwnd and viewer_hwnd != hwnd:
+            try:
+                title = win32gui.GetWindowText(viewer_hwnd)
+            except Exception:
+                title = '图片和视频'
+            self.log(f"已自动定位到微信查看器窗口：{title}", "input")
+            hwnd = viewer_hwnd
+            self.active_hwnd = hwnd
+
+        name = (info.get('name') or '').strip()
+        chat_id = info.get('chat_id') or ''
+        kind = '群聊' if info.get('is_group') else '联系人'
+        if not name:
+            self.log(
+                f"已识别会话 ID（{kind}）：{chat_id}，但未捕获到名称；"
+                "请重新打开该图片查看器后再下载，以便记录群名。图片先保存到原目录",
+                "warning",
+            )
+            return hwnd
+
+        safe = sanitize_folder_name(name)
+        if not safe:
+            self.log(f"会话名「{name}」不能用作文件夹名，图片保存到原目录", "warning")
+            return hwnd
+
+        target = os.path.join(self.base_image_folder, safe)
+        if os.path.exists(target) and not os.path.isdir(target):
+            self.log(f"子文件夹路径被同名文件占用：{target}，图片保存到原目录", "warning")
+            return hwnd
+        try:
+            os.makedirs(target, exist_ok=True)
+        except OSError as e:
+            self.log(f"创建会话子文件夹失败：{e}，图片保存到原目录", "warning")
+            return hwnd
+
+        self.chat_name = name
+        self.image_folder = target
+        self.log(f"已识别会话：{name}（{kind}），保存到子文件夹「{safe}」", "input")
+        return hwnd
+
     def run(self):
-        file_ops.ensure_folder(self.image_folder)
         if not self._countdown(3):
             self.log("下载已取消", "warning")
             return
@@ -519,6 +583,11 @@ class WeChatDownloader:
             if hwnd:
                 self.log("未手动选择窗口，已自动捕获前台窗口（请确保微信已置顶）", "warning")
         self.active_hwnd = hwnd
+
+        if self.use_chat_folder:
+            hwnd = self._apply_chat_folder(hwnd)
+
+        file_ops.ensure_folder(self.image_folder)
 
         # 根据命名方案计算实际起始序号（避免覆盖文件夹已有同名文件）
         self.seq = compute_start(self.image_folder, self.naming)
