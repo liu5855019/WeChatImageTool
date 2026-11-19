@@ -3,7 +3,17 @@
 
 import os
 import shutil
+import stat
 from config import IMAGE_EXTS
+
+
+def ensure_writable(path):
+    """清除文件的只读属性。微信复制来的文件常带只读，会导致覆盖保存失败。"""
+    try:
+        if os.path.exists(path):
+            os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+    except Exception:
+        pass
 
 
 def ensure_folder(path):
@@ -25,6 +35,7 @@ def clear_folder(folder):
             full = os.path.join(dirpath, name)
             try:
                 if os.path.isfile(full):
+                    ensure_writable(full)
                     os.remove(full)
                     count += 1
             except Exception:

@@ -21,8 +21,9 @@ _uia = None
 _uia_failed = False
 _thread_state = threading.local()
 _cache_lock = threading.Lock()
-_name_cache = {}  # chat_id -> 会话显示名，只在查看器出现瞬间写入
+_name_cache = {}  # chat_id -> 会话显示名，仅本次运行有效
 _seen_viewers = {}  # viewer_hwnd -> (chat_id, captured_ok)
+_ignore_viewers = set()  # 用户要求重新识别的旧窗口：等它关闭后才允许再次捕获
 _watcher_stop = None
 _watcher_thread = None
 _watcher_log = None
@@ -57,6 +58,29 @@ def _ensure_thread(auto):
     if not getattr(_thread_state, 'inited', False):
         auto.InitializeUIAutomationInCurrentThread()
         _thread_state.inited = True
+
+
+def set_chat_name(chat_id, name):
+    """设置用户修正的会话名，仅保存在内存（本次运行有效）。
+
+    传空字符串表示强制不使用该会话名，下载时回退到原目录。
+    """
+    if not chat_id:
+        return
+    with _cache_lock:
+        _name_cache[chat_id] = (name or '').strip()
+
+
+def clear_chat_name(chat_id):
+    """清除某会话的内存缓存，并让监视器忽略仍开着的旧查看器窗口"""
+    global _seen_viewers, _ignore_viewers
+    with _cache_lock:
+        _name_cache.pop(chat_id, None)
+    for hwnd, state in list(_seen_viewers.items()):
+        if state and state[0] == chat_id:
+            _seen_viewers.pop(hwnd, None)
+            # 旧窗口仍在，不能让监视器立刻用当前聊天再写一遍；等它关闭再移除忽略标记
+            _ignore_viewers.add(hwnd)
 
 
 def parse_viewer_chat_id(automation_id):
@@ -174,7 +198,7 @@ def _read_current_chat_name(auto, main_hwnd):
     return ''
 
 
-def _info_from_viewer(auto, viewer_hwnd, read_current=False):
+def _info_from_viewer(auto, viewer_hwnd, read_current=False, force_current=False):
     try:
         viewer = auto.ControlFromHandle(viewer_hwnd)
         chat_id = parse_viewer_chat_id(viewer.AutomationId or '')
@@ -208,9 +232,9 @@ def _info_from_viewer(auto, viewer_hwnd, read_current=False):
 
     with _cache_lock:
         name = _name_cache.get(chat_id, '')
-    # 只有查看器刚出现时（read_current=True）才允许用主窗口当前聊天名写入缓存，
-    # 下载/选窗口时只读缓存，避免用户切换聊天后把当前聊天名误当成图片所属群名。
-    if not name and read_current and main_hwnd:
+    # 只有显式要求读当前聊天（选窗口/重新识别/后台捕获）时才读主窗口，
+    # 避免下载时因用户切换聊天导致名字漂移。force_current 用于覆盖旧缓存。
+    if (force_current or not name) and read_current and main_hwnd:
         name = _read_current_chat_name(auto, main_hwnd)
         if name:
             with _cache_lock:
@@ -224,13 +248,13 @@ def _info_from_viewer(auto, viewer_hwnd, read_current=False):
     }
 
 
-def get_chat_info(hwnd, read_current=False):
+def get_chat_info(hwnd, read_current=False, force_current=False):
     """根据窗口句柄读取会话信息。
 
-    ``read_current=True`` 时允许读取主窗口当前聊天名并写入缓存，仅供查看器
-    出现瞬间的后台捕获使用；普通调用只读缓存，避免名称漂移。
+    ``read_current=True`` 允许读主窗口当前聊天名；``force_current=True``
+    时即使已有缓存也重新读一次（用于用户主动点「选择窗口」/「重新识别」）。
+    用户修正名始终优先，不会被覆盖。
     返回 ``{'chat_id', 'name', 'is_group', 'viewer_hwnd'}``，失败返回 None。
-    如果传入的不是查看器窗口，会自动在同一微信进程里寻找查看器。
     """
     auto = _load_uia()
     if auto is None or not hwnd:
@@ -241,7 +265,7 @@ def get_chat_info(hwnd, read_current=False):
     except Exception:
         return None
 
-    info = _info_from_viewer(auto, hwnd, read_current=read_current)
+    info = _info_from_viewer(auto, hwnd, read_current=read_current, force_current=force_current)
     if info:
         return info
 
@@ -252,15 +276,17 @@ def get_chat_info(hwnd, read_current=False):
     viewer_hwnd = find_viewer_window(pid)
     if viewer_hwnd and viewer_hwnd != hwnd:
         try:
-            return _info_from_viewer(auto, viewer_hwnd, read_current=read_current)
+            return _info_from_viewer(
+                auto, viewer_hwnd, read_current=read_current, force_current=force_current,
+            )
         except Exception:
             return None
     return None
 
 
-def capture_viewer_chat_name(hwnd):
-    """在查看器刚出现时读取主窗口当前会话名并缓存，返回会话信息"""
-    return get_chat_info(hwnd, read_current=True)
+def capture_viewer_chat_name(hwnd, force=False):
+    """读取主窗口当前会话名并缓存；force=True 时覆盖已有缓存"""
+    return get_chat_info(hwnd, read_current=True, force_current=force)
 
 
 def set_watcher_logger(cb):
@@ -293,8 +319,13 @@ def _watcher_loop(interval):
         for hwnd in list(_seen_viewers):
             if hwnd not in current and not win32gui.IsWindow(hwnd):
                 del _seen_viewers[hwnd]
+        for hwnd in list(_ignore_viewers):
+            if hwnd not in current and not win32gui.IsWindow(hwnd):
+                _ignore_viewers.discard(hwnd)
 
         for hwnd in viewers:
+            if hwnd in _ignore_viewers:
+                continue
             state = _seen_viewers.get(hwnd)
             if state and state[1]:
                 continue
@@ -309,8 +340,8 @@ def _watcher_loop(interval):
             if captured_ok and hwnd in startup_viewers and hwnd not in warned:
                 warned.add(hwnd)
                 _log_watcher(
-                    "检测到工具启动前已打开的微信图片查看器；会话名按当前聊天识别，"
-                    "如不正确请重新打开该图片后重新下载。",
+                    "检测到工具启动前已打开的查看器；会话名按当前聊天推断，可能不对。"
+                    "请先把微信主窗口切到对应聊天，再点「重新识别」，或直接修改「会话名」。",
                     "warning",
                 )
 

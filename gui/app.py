@@ -15,7 +15,10 @@ from gui.widgets import SectionCard, browse_row, labeled_field
 from core import file_ops
 from core.downloader import WeChatDownloader, list_visible_windows
 from core.naming import NamingScheme
-from core.wechat_uia import get_chat_info, start_viewer_watcher
+from core.wechat_uia import (
+    get_chat_info, capture_viewer_chat_name, start_viewer_watcher,
+    set_chat_name, clear_chat_name,
+)
 
 
 NAMING_PRESETS = ['1001起序', '0001起序', '1起序', '日期+序号', '自定义']
@@ -40,6 +43,9 @@ class WeiXinImageToolGUI:
         self.var_chat_folder = tk.BooleanVar(value=True)   # 按微信会话建子文件夹
         self.selected_hwnd = None                      # 用户手动选择的微信窗口句柄
         self.var_target_window = tk.StringVar(value="未选择")
+        self.var_chat_name = tk.StringVar(value="")       # 会话名（识别后可手动修正）
+        self.current_chat_id = None
+        self._detected_chat_name = ""
 
         self.stop_event = threading.Event()
         self.worker = None
@@ -150,6 +156,22 @@ class WeiXinImageToolGUI:
         ctk.CTkLabel(pick_row, textvariable=self.var_target_window, font=ctk.CTkFont(size=11),
                      text_color="#9CA3AF", anchor="w").pack(side="left", padx=(10, 0))
 
+        # 会话名：自动识别，识别不准可直接修改（会自动记住）
+        name_row = ctk.CTkFrame(card_dl.body, fg_color="transparent")
+        name_row.pack(fill="x", pady=(0, 6))
+        ctk.CTkLabel(name_row, text="会话名", font=ctk.CTkFont(size=12),
+                     text_color="#6B7280", width=96, anchor="w").pack(side="left", padx=(0, 8))
+        self.entry_chat_name = ctk.CTkEntry(
+            name_row, textvariable=self.var_chat_name, font=ctk.CTkFont(size=12),
+            height=32, border_color="#E5E7EB", corner_radius=6,
+            placeholder_text="选择查看器后自动填入；不正确可直接修改",
+        )
+        self.entry_chat_name.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.entry_chat_name.bind("<Return>", lambda _: self._save_chat_name())
+        self.entry_chat_name.bind("<FocusOut>", lambda _: self._save_chat_name())
+        create_button(name_row, "重新识别", command=self._recapture_chat,
+                      width=88, height=32, style_type="secondary").pack(side="left")
+
         # 开始下载 / 停止
         dl_row = ctk.CTkFrame(card_dl.body, fg_color="transparent")
         dl_row.pack(fill="x", pady=(0, 6))
@@ -163,9 +185,10 @@ class WeiXinImageToolGUI:
         # 操作说明
         ctk.CTkLabel(
             card_dl.body,
-            text="提示：先点「选择微信窗口」选中微信图片查看器，再点「开始下载」。"
-                 "3 秒倒计时内点击微信窗口使其置顶，工具会自动逐张保存。"
-                 "推荐用「剪贴板复制」模式，最稳定；Ctrl+S 模式用于兼容旧版微信。",
+            text="提示：先把微信主窗口切到图片所属的聊天 → 点「选择微信窗口」选中查看器，"
+                 "「会话名」会按当前聊天自动填入；不对就切到正确聊天再点「重新识别」，"
+                 "也可直接修改（仅本次运行有效），清空则保存到原目录。再点「开始下载」，"
+                 "3 秒倒计时内点击微信窗口使其置顶。推荐「剪贴板复制」模式。",
             font=ctk.CTkFont(size=11), text_color="#9CA3AF", anchor="w", justify="left",
             wraplength=620).pack(anchor="w", pady=(2, 0))
         card_dl.pack(fill="x", pady=(0, 10))
@@ -297,7 +320,7 @@ class WeiXinImageToolGUI:
                 self.selected_hwnd = hwnd
                 self.var_target_window.set(title[:60])
                 self._log(f"已选择窗口：{title[:40]}", "success")
-                self._log_chat_hint(hwnd)
+                self._refresh_chat_from_main(hwnd)
                 dlg.destroy()
             return _choose
 
@@ -310,24 +333,71 @@ class WeiXinImageToolGUI:
                 command=make_choose(hwnd, title)
             ).pack(fill="x", padx=6, pady=3)
 
-    def _log_chat_hint(self, hwnd):
-        """显示已缓存的会话名，不在这里读取当前聊天，避免名称漂移"""
+    def _refresh_chat_from_main(self, hwnd, reset=False):
+        """用户主动触发：读主窗口当前选中的聊天名，作为图片所属会话名。
+
+        选中查看器窗口时自动调用一次，点「重新识别」时再调用一次。
+        主窗口不暴露会话 ID，只有当前聊天名，所以准确性取决于用户
+        先把主窗口切到图片所属的那个聊天。
+        """
+        basic = self._chat_info(hwnd)
+        if not basic:
+            self._log("未识别到微信图片查看器会话，请确认选中的是「图片和视频」窗口", "warning")
+            return None
+        if reset:
+            clear_chat_name(basic.get('chat_id'))
         try:
-            info = get_chat_info(hwnd)
+            info = capture_viewer_chat_name(hwnd, force=True)
         except Exception:
-            return
+            info = None
         if not info:
-            return
-        if not info.get('name'):
+            self._log("读取会话名失败", "error")
+            return None
+        self.current_chat_id = info.get('chat_id')
+        name = info.get('name') or ''
+        self._detected_chat_name = name
+        self.var_chat_name.set(name)
+        if not name:
             self._log(
-                "已识别查看器会话 ID，但名称尚未捕获；请重新打开该图片查看器后再下载，"
-                "以便自动记录群名。",
+                "没读到主窗口当前聊天名；请先在微信里点开图片所属的群/联系人，"
+                "再点「重新识别」，或直接在「会话名」框里填写。",
                 "warning",
             )
+        else:
+            kind = '群聊' if info.get('is_group') else '联系人'
+            self._log(
+                f"已按主窗口当前聊天识别会话：{name}（{kind}）；"
+                "如不正确请先切到对应聊天再点「重新识别」，或直接改「会话名」",
+                "success",
+            )
+        return info
+
+    def _chat_info(self, hwnd=None):
+        target = hwnd or self.selected_hwnd
+        if not target:
+            return None
+        try:
+            return get_chat_info(target)
+        except Exception:
+            return None
+
+    def _save_chat_name(self):
+        """用户修改会话名后更新内存缓存，仅本次运行有效"""
+        if not self.current_chat_id:
             return
-        kind = '群聊' if info.get('is_group') else '联系人'
-        suffix = '，下载时按会话建子文件夹' if self.var_chat_folder.get() else ''
-        self._log(f"已识别会话：{info['name']}（{kind}）{suffix}", "success")
+        value = self.var_chat_name.get().strip()
+        if value == self._detected_chat_name:
+            return
+        set_chat_name(self.current_chat_id, value)
+        self._detected_chat_name = value
+        self._log(f"会话名已修正为：{value or '（空，保存到原目录）'}（本次运行有效）", "success")
+
+    def _recapture_chat(self):
+        """重新读取主窗口当前聊天名（先切到图片所属聊天再点这个按钮）"""
+        if not self.selected_hwnd:
+            self._log("请先点「选择微信窗口」选中图片查看器", "warning")
+            return
+        self._refresh_chat_from_main(self.selected_hwnd, reset=True)
 
     def _run_download(self, downloader):
         try:

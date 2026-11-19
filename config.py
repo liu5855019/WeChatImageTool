@@ -95,8 +95,11 @@ DEFAULTS = {
     'next_key': 'right',            # 切下一张所用按键
 }
 
-# 支持的图片扩展名
-IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp')
+# 支持的媒体扩展名（微信「图片和视频」查看器也能复制 mp4 等视频）
+IMAGE_EXTS = (
+    '.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp',
+    '.mp4', '.mov', '.avi', '.mkv', '.wmv',
+)
 
 # 厘米转磅（Word 单位）系数
 CM_TO_PT = 28.35

@@ -392,10 +392,12 @@ class WeChatDownloader:
                 ext = os.path.splitext(src)[1].lower() or '.jpg'
                 target = os.path.join(self.image_folder, f"{base}{ext}")
                 try:
+                    file_ops.ensure_writable(target)
                     if os.path.abspath(os.path.dirname(src)) == os.path.abspath(self.image_folder):
                         os.rename(src, target)
                     else:
                         shutil.move(src, target)
+                    file_ops.ensure_writable(target)
                     return target
                 except Exception:
                     return None
@@ -485,6 +487,7 @@ class WeChatDownloader:
             if kind == 'image':
                 target = os.path.join(self.image_folder, f"{base}.png")
                 try:
+                    file_ops.ensure_writable(target)
                     data.save(target, 'PNG')
                     return True, '.png', None
                 except Exception as e:
@@ -495,7 +498,11 @@ class WeChatDownloader:
                 ext = os.path.splitext(src)[1].lower() or '.png'
                 target = os.path.join(self.image_folder, f"{base}{ext}")
                 try:
+                    # 微信复制来的源文件常带只读属性，copy2 会把它带到目标；
+                    # 覆盖已存在的只读文件也会失败，所以前后都清一次。
+                    file_ops.ensure_writable(target)
                     shutil.copy2(src, target)
+                    file_ops.ensure_writable(target)
                     return True, ext, src
                 except Exception as e:
                     self.log(f"复制文件失败：{e}", "warning")
@@ -640,6 +647,7 @@ class WeChatDownloader:
                     except Exception:
                         pass
                     target = os.path.join(self.image_folder, f"{base}{ext}")
+                    file_ops.ensure_writable(target)
                     self._fill_save_dialog(dialog_hwnd, target)
                     self._wait_window_close(dialog_hwnd, timeout=6.0)
                     time.sleep(0.5)
