@@ -14,10 +14,13 @@ import win32clipboard
 from PIL import Image, ImageGrab
 
 import config
-from config import IMAGE_EXTS
+from config import IMAGE_EXTS, VIDEO_EXTS
 from core import file_ops
 from core.naming import NamingScheme, compute_start
-from core.wechat_uia import get_chat_info, sanitize_folder_name, is_nav_disabled
+from core.wechat_uia import (
+    get_chat_info, sanitize_folder_name, is_nav_disabled,
+    click_view_original_button,
+)
 
 
 def list_visible_windows(exclude_hwnd=None):
@@ -47,7 +50,8 @@ class WeChatDownloader:
 
     def __init__(self, image_folder, count, wechat_save_src=None,
                  direction='向右', naming=None, start_index=1001, log_cb=None, stop_event=None,
-                 selected_hwnd=None, mode='ctrl_s', use_chat_folder=True):
+                 selected_hwnd=None, mode='ctrl_s', use_chat_folder=True,
+                 download_original_video=True):
         self.image_folder = image_folder
         self.base_image_folder = image_folder
         self.count = count
@@ -63,6 +67,7 @@ class WeChatDownloader:
         self.selected_hwnd = selected_hwnd  # 用户手动选择的微信窗口句柄
         self.mode = mode  # 'ctrl_s' | 'clipboard'
         self.use_chat_folder = use_chat_folder  # 是否按微信会话名建子文件夹
+        self.download_original_video = download_original_video  # 视频优先下载原文件
         self.chat_name = ''
         self.window_title = config.GUI_CONF.get('window_title', '微信图片下载工具')
         self._last_src = None  # 上一张成功保存的剪贴板源路径（用于排除残留）
@@ -457,6 +462,45 @@ class WeChatDownloader:
             time.sleep(0.15)
         return (None, None)
 
+    def _get_original_video(self, compressed_src, timeout=12.0):
+        """点击「查看原视频」拿到微信落盘的原文件，返回原文件路径或 None。
+
+        Ctrl+C 拿到的视频是微信压缩版（几百 KB）；点「查看原视频」后微信会在
+        同目录生成 ``<原名>_raw<扩展名>`` 原文件（体积大很多）。这里点击按钮后
+        轮询等待该文件出现且大小稳定，再交给调用方复制。失败时返回 None，
+        调用方自动回退到压缩版，不中断下载。
+        """
+        base, ext = os.path.splitext(compressed_src)
+        raw_path = base + '_raw' + ext
+        try:
+            clicked = click_view_original_button(self.active_hwnd or self.selected_hwnd)
+        except Exception:
+            clicked = None
+        if not clicked:
+            return None
+
+        self.log("已点击「查看原视频」，等待原文件落盘…", "info")
+        deadline = time.time() + timeout
+        last_size = -1
+        stable = 0
+        while time.time() < deadline:
+            if self.stop_event.is_set():
+                return None
+            try:
+                if os.path.exists(raw_path):
+                    size = os.path.getsize(raw_path)
+                    if size > 0 and size == last_size:
+                        stable += 1
+                        if stable >= 2:  # 连续两次大小一致，认为写入完成
+                            return raw_path
+                    else:
+                        stable = 0
+                    last_size = size
+            except Exception:
+                pass
+            time.sleep(0.3)
+        return None
+
     def _clipboard_copy_image(self, base, max_attempts=4):
         """发送 Ctrl+C（必要时多次重发），从剪贴板读取图片保存为 base（文件名基础名）。
         成功返回 (True, ext, src)；全部失败返回 (False, None, None)。
@@ -501,6 +545,14 @@ class WeChatDownloader:
             if kind == 'files':
                 src = data[0]
                 ext = os.path.splitext(src)[1].lower() or '.png'
+                # 视频：优先拿「查看原视频」的原文件，失败则回退压缩版
+                if self.download_original_video and ext in VIDEO_EXTS:
+                    original = self._get_original_video(src)
+                    if original:
+                        src = original
+                        ext = os.path.splitext(src)[1].lower() or ext
+                        size_mb = os.path.getsize(src) / 1024 / 1024
+                        self.log(f"使用原视频文件（{size_mb:.1f} MB）", "success")
                 target = os.path.join(self.image_folder, f"{base}{ext}")
                 try:
                     # 微信复制来的源文件常带只读属性，copy2 会把它带到目标；

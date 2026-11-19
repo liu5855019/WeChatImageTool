@@ -359,6 +359,51 @@ def is_next_disabled(hwnd):
     return is_nav_disabled(hwnd, 'right')
 
 
+def _find_button_by_prefix(root, prefix, max_depth=14):
+    """按名字前缀找按钮（「查看原视频」按钮名带大小，如「查看原视频(3.1M)」）"""
+    stack = [(root, 0)]
+    while stack:
+        el, depth = stack.pop()
+        if depth > max_depth:
+            continue
+        try:
+            name = el.Name or ''
+            if el.ControlTypeName == 'ButtonControl' and name.startswith(prefix):
+                return el
+        except Exception:
+            pass
+        try:
+            for child in el.GetChildren():
+                stack.append((child, depth + 1))
+        except Exception:
+            pass
+    return None
+
+
+def click_view_original_button(hwnd):
+    """点击「查看原视频」按钮，让微信把当前视频的原文件落盘。
+
+    微信会在视频同目录生成 ``<原名>_raw<扩展名>`` 文件（如 ``xxx_raw.mp4``）。
+    成功点击返回 True；按钮不存在或点击失败返回 None。调用方随后轮询等待
+    ``_raw`` 文件落盘。只读 UIA 树 + 点击按钮。
+    """
+    auto = _load_uia()
+    if auto is None or not hwnd:
+        return None
+    try:
+        _ensure_thread(auto)
+        viewer = _viewer_control(auto, hwnd)
+        if viewer is None:
+            return None
+        button = _find_button_by_prefix(viewer, '查看原视频')
+        if button is None:
+            return None
+        button.Click()
+        return True
+    except Exception:
+        return None
+
+
 def set_watcher_logger(cb):
     """设置后台捕获的日志回调，签名 cb(msg, level)"""
     global _watcher_log

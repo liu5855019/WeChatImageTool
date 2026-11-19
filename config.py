@@ -92,7 +92,8 @@ DEFAULTS = {
     'image_folder': default_image_folder(),
     'download_count': 10,
     'wechat_save_src': default_wechat_src(),  # 监控来源（微信默认保存目录）
-    'nav_direction': '向右',        # 切图方向：向右 / 向左（向左用于从中间往前下载）
+    'nav_direction': '向左',        # 切图方向：向右 / 向左（默认向左，从当前张往前下载）
+    'download_original_video': True,  # 视频优先下载「查看原视频」的原文件（体积较大）
 }
 
 # 支持的媒体扩展名（微信「图片和视频」查看器也能复制 mp4 等视频）
@@ -100,6 +101,9 @@ IMAGE_EXTS = (
     '.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp',
     '.mp4', '.mov', '.avi', '.mkv', '.wmv',
 )
+
+# 视频扩展名：Ctrl+C 拿到的是微信压缩版，点「查看原视频」会落盘 _raw 原文件
+VIDEO_EXTS = ('.mp4', '.mov', '.avi', '.mkv', '.wmv', '.flv', '.webm')
 
 # 厘米转磅（Word 单位）系数
 CM_TO_PT = 28.35
