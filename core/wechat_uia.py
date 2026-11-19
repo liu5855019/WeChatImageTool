@@ -289,6 +289,68 @@ def capture_viewer_chat_name(hwnd, force=False):
     return get_chat_info(hwnd, read_current=True, force_current=force)
 
 
+def _find_button(root, name, max_depth=12):
+    """在 UIA 树里按名字找按钮控件"""
+    stack = [(root, 0)]
+    while stack:
+        el, depth = stack.pop()
+        if depth > max_depth:
+            continue
+        try:
+            if el.ControlTypeName == 'ButtonControl' and (el.Name or '') == name:
+                return el
+        except Exception:
+            pass
+        try:
+            for child in el.GetChildren():
+                stack.append((child, depth + 1))
+        except Exception:
+            pass
+    return None
+
+
+def _viewer_control(auto, hwnd):
+    """取查看器的 UIA 根节点；传入的不是查看器时在同进程里找"""
+    try:
+        ctrl = auto.ControlFromHandle(hwnd)
+        if ctrl and ctrl.ClassName == 'mmui::PreviewWindow':
+            return ctrl
+    except Exception:
+        pass
+    try:
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+    except Exception:
+        return None
+    viewer_hwnd = find_viewer_window(pid)
+    if not viewer_hwnd:
+        return None
+    try:
+        return auto.ControlFromHandle(viewer_hwnd)
+    except Exception:
+        return None
+
+
+def is_next_disabled(hwnd):
+    """查看器「下一张」按钮是否已禁用（即已到最后一张）。
+
+    读不到时返回 False，让下载流程照常继续，不因识别失败而中断。
+    """
+    auto = _load_uia()
+    if auto is None or not hwnd:
+        return False
+    try:
+        _ensure_thread(auto)
+        viewer = _viewer_control(auto, hwnd)
+        if viewer is None:
+            return False
+        button = _find_button(viewer, '下一张')
+        if button is None:
+            return False
+        return not bool(button.IsEnabled)
+    except Exception:
+        return False
+
+
 def set_watcher_logger(cb):
     """设置后台捕获的日志回调，签名 cb(msg, level)"""
     global _watcher_log

@@ -17,7 +17,7 @@ import config
 from config import IMAGE_EXTS
 from core import file_ops
 from core.naming import NamingScheme, compute_start
-from core.wechat_uia import get_chat_info, sanitize_folder_name
+from core.wechat_uia import get_chat_info, sanitize_folder_name, is_next_disabled
 
 
 def list_visible_windows(exclude_hwnd=None):
@@ -681,6 +681,17 @@ class WeChatDownloader:
                 else:
                     self.log(f"第 {i+1} 张保存失败：微信未聚焦或默认保存目录不可访问，已停止", "error")
                     break
+
+            # 自动结束：查看器「下一张」按钮被禁用说明已到最后一张，不再切图
+            try:
+                if is_next_disabled(hwnd):
+                    # Qt 状态可能晚一拍，短间隔再确认一次，避免误停
+                    time.sleep(0.2)
+                    if is_next_disabled(hwnd):
+                        self.log("已是最后一张，自动结束", "success")
+                        break
+            except Exception:
+                pass
 
             # 切到下一张
             pyautogui.press(self.next_key)
