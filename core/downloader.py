@@ -16,10 +16,11 @@ from PIL import Image, ImageGrab
 import config
 from config import IMAGE_EXTS, VIDEO_EXTS
 from core import file_ops, media_time
-from core.naming import NamingScheme, compute_start
+from core.naming import NamingScheme, compute_start, unique_path
 from core.wechat_uia import (
     get_chat_info, sanitize_folder_name, is_nav_disabled,
     click_view_original_button, read_viewer_chat_id, find_viewer_window,
+    is_low_integrity,
 )
 
 
@@ -60,7 +61,8 @@ class WeChatDownloader:
         self.direction = direction if direction in self.DIRECTION_KEYS else '向右'
         self.next_key = self.DIRECTION_KEYS[self.direction]
         self.nav_dir = 'left' if self.direction == '向左' else 'right'
-        self.naming = naming or NamingScheme.from_preset('1001起序')
+        self.naming = naming or NamingScheme.from_preset(
+            config.DEFAULTS.get('naming_preset', '文件日期'))
         self.start_index = start_index
         self.log = log_cb or (lambda msg, level="info": None)
         self.stop_event = stop_event or threading.Event()
@@ -596,6 +598,12 @@ class WeChatDownloader:
 
         if not info:
             self.log("未识别到微信图片查看器会话，图片保存到原目录", "warning")
+            if is_low_integrity():
+                self.log(
+                    "原因：工具以受限（低完整性）方式运行，Windows 禁止读取微信界面；"
+                    "请用普通方式启动（资源管理器双击 exe 或普通命令行）后再试。",
+                    "warning",
+                )
             return hwnd
 
         viewer_hwnd = info.get('viewer_hwnd')
@@ -671,14 +679,12 @@ class WeChatDownloader:
         else:
             self.log("未识别到会话 ID，无法反查消息时间，将用文件时间/月份推测", "warning")
 
-    def _stamp_media_time(self, target, source_path=None, copy_start=None, is_image=None):
-        """把下载后的文件时间写成拍摄/消息时间（修改 + 创建时间）。
+    def _media_time_info(self, target, source_path=None, copy_start=None, is_image=None):
+        """按证据链取目标的拍摄/消息时间，返回 ``(datetime, 来源, 是否推测)``。
 
-        证据链：EXIF 拍摄时间 > 微信消息时间 > 源文件时间 > 路径月份推测 > 当前时间。
-        失败只记日志，不影响下载主流程。
+        只做解析，不改文件时间；证据链：EXIF 拍摄时间 > 微信消息时间 >
+        源文件时间 > 路径月份推测 > 当前时间。
         """
-        if not self.apply_media_time:
-            return None
         if not target or not os.path.exists(target):
             return None
         try:
@@ -698,21 +704,65 @@ class WeChatDownloader:
                     # Ctrl+S 模式：源文件未知，按“刚被谁读过”反查
                     message_time, msg_detail = media_time.dat_message_evidence(
                         self.wechat_root, self.chat_id, month=None, after_ts=copy_start)
-            dt, reason = media_time.resolve_media_time(
+            dt, reason, guessed = media_time.resolve_media_time(
                 exif_path=exif_path, message_time=message_time,
                 source_path=source_path, fallback_path=source_path or target)
             if reason == '微信消息时间':
                 reason = f"消息时间估算·{msg_detail}" if msg_detail else "消息时间估算"
             elif reason == '源文件时间':
                 reason = "微信落盘时间估算"
-            if media_time.apply_file_time(target, dt):
-                self._last_time = dt
-                self.log(f"已写入时间：{dt:%Y-%m-%d %H:%M:%S}（{reason}）", "input")
-                return dt
-            self.log("写入文件时间失败（文件可能被占用）", "warning")
+            return dt, reason, guessed
         except Exception as e:
-            self.log(f"写入文件时间失败：{e}", "warning")
-        return None
+            self.log(f"解析拍摄/消息时间失败：{e}", "warning")
+            return None
+
+    def _stamp_media_time(self, target, source_path=None, copy_start=None, is_image=None):
+        """取时间并（按开关）写入文件；返回 ``(datetime, 来源, 是否推测)`` 供命名使用。"""
+        info = self._media_time_info(target, source_path, copy_start, is_image)
+        if info is None or not self.apply_media_time:
+            return info
+        dt, reason, _guessed = info
+        if media_time.apply_file_time(target, dt):
+            self._last_time = dt
+            self.log(f"已写入时间：{dt:%Y-%m-%d %H:%M:%S}（{reason}）", "input")
+            return info
+        self.log("写入文件时间失败（文件可能被占用）", "warning")
+        return info
+
+    def _finalize_saved(self, path, source_path=None, copy_start=None):
+        """给刚保存的文件写时间，并在「文件日期」方案下按时间重命名。
+
+        返回 ``(最终路径, 时间信息, 是否重命名)``；时间信息为
+        ``(datetime, 来源, 是否推测)`` 或 None。时间方案必须先落盘再取名
+        （保存对话框/剪贴板阶段还拿不到时间），因此这里做一次重命名；重名时
+        依次加 ``_2``、``_3`` 避免覆盖。
+        """
+        if not path or not os.path.exists(path):
+            return path, None, False
+        if not (self.apply_media_time or self.naming.time):
+            return path, None, False
+        info = self._stamp_media_time(path, source_path, copy_start)
+        if not self.naming.time:
+            return path, info, False
+        if info:
+            dt, _reason, guessed = info
+            base = self.naming.format(self.seq, when=dt, guessed=guessed)
+        else:
+            # 时间解析失败（文件被占用等）时按下载时间兜底，避免留下 _tmp 临时名
+            base = self.naming.format(self.seq, guessed=True)
+        ext = os.path.splitext(path)[1].lower()
+        final = unique_path(self.image_folder, base, ext)
+        if os.path.abspath(final) == os.path.abspath(path):
+            return path, info, False
+        try:
+            file_ops.ensure_writable(path)
+            os.rename(path, final)
+            file_ops.ensure_writable(final)
+        except OSError as e:
+            self.log(f"按时间重命名失败：{os.path.basename(path)} -> "
+                     f"{os.path.basename(final)}（{e}）", "warning")
+            return path, info, False
+        return final, info, True
 
     def run(self):
         if not self._countdown(3):
@@ -742,7 +792,15 @@ class WeChatDownloader:
 
         # 根据命名方案计算实际起始序号（避免覆盖文件夹已有同名文件）
         self.seq = compute_start(self.image_folder, self.naming)
-        self.log(f"命名方案：{self.naming.preset}（起始序号 {self.seq}，示例：{', '.join(self.naming.preview(3))}）", "info")
+        if self.naming.time:
+            self.log(
+                f"命名方案：{self.naming.preset}（按拍摄/消息时间命名，推测时间加 "
+                f"{self.naming.GUESS_SUFFIX}；示例：{', '.join(self.naming.preview(3))}）",
+                "info",
+            )
+        else:
+            self.log(f"命名方案：{self.naming.preset}（起始序号 {self.seq}，"
+                     f"示例：{', '.join(self.naming.preview(3))}）", "info")
 
         saved = 0
         # count<=0 表示不限数量，一直下载到当前方向的边界（第一张/最后一张）
@@ -758,7 +816,11 @@ class WeChatDownloader:
                 break
             i += 1
 
-            base = self.naming.format(self.seq)
+            if self.naming.time:
+                # 时间方案此时还拿不到媒体时间，先用唯一临时名落盘，取到时间后再重命名
+                base = f"_tmp{self.seq:06d}_{int(time.time() * 1000) % 100000:05d}"
+            else:
+                base = self.naming.format(self.seq)
             self.seq += 1  # 无论成功失败序号都顺延（失败留空号，不中断整体）
 
             # 确保微信查看器有焦点
@@ -779,20 +841,22 @@ class WeChatDownloader:
                 if ok:
                     self._last_src = src  # 记录刚保存的源路径，供下次排除残留
                     saved += 1
-                    self.log(f"已保存 {base}{ext} ({progress(saved)})", "success")
                     target = os.path.join(self.image_folder, f"{base}{ext}")
-                    self._stamp_media_time(target, src, copy_start)
+                    final, info, _renamed = self._finalize_saved(target, src, copy_start)
+                    note = f"，{info[1]}" if (self.naming.time and info) else ""
+                    self.log(f"已保存 {os.path.basename(final)} ({progress(saved)}{note})", "success")
                 else:
-                    self.log(f"第 {base} 张多次重试仍失败，跳过并继续下一张", "error")
+                    self.log(f"第 {progress(i)} 张多次重试仍失败，跳过并继续下一张", "error")
 
             else:
                 # ---------- Ctrl+S 模式 ----------
                 self.log(f"目标保存文件夹：{self.image_folder}", "info")
                 pyautogui.hotkey('ctrl', 's')
-                self.log(f"已发送 Ctrl+S（第 {progress(i)} 张，命名 {base}）", "info")
+                self.log(f"已发送 Ctrl+S（第 {progress(i)} 张）", "info")
                 time.sleep(0.5)  # 给对话框一点弹出时间
 
                 saved_this = False
+                how = ''
 
                 # 1) 尝试接管「另存为」对话框，把完整目标路径写进去并用 Alt+S 提交
                 dialog_hwnd, edit_hwnd = self._find_save_dialog(timeout=4.0)
@@ -812,7 +876,7 @@ class WeChatDownloader:
                     real = target if os.path.exists(target) else self._find_saved_target(base)
                     if real and os.path.exists(real):
                         saved_this = True
-                        self.log(f"已保存 {os.path.basename(real)} ({progress(i)}) -> {self.image_folder}", "success")
+                        how = '对话框保存'
                 else:
                     # 2) 找不到对话框：可能检测失败但对话框实际存在，直接 Alt+S 提交
                     #    不盲填完整路径，避免触发「文件名无效」错误。
@@ -824,18 +888,21 @@ class WeChatDownloader:
                     real = self._find_saved_target(base)
                     if real and os.path.exists(real):
                         saved_this = True
-                        self.log(f"已保存 {os.path.basename(real)} ({progress(i)}) -> {self.image_folder}", "success")
+                        how = 'Alt+S 提交'
 
                 # 3) 主流程仍失败：递归扫描微信默认保存目录里最新修改的图，搬到你设的文件夹
                 if not saved_this:
                     real = self._rescue_via_monitor(base, timeout=8.0)
                     if real and os.path.exists(real):
                         saved_this = True
-                        self.log(f"已从微信默认目录搬移 {os.path.basename(real)} ({progress(i)}) -> {self.image_folder}", "success")
+                        how = '从微信默认目录搬移'
 
                 if saved_this:
                     saved += 1
-                    self._stamp_media_time(real, None, copy_start)
+                    final, info, _renamed = self._finalize_saved(real, None, copy_start)
+                    note = f"，{info[1]}" if (self.naming.time and info) else ""
+                    self.log(f"已保存 {os.path.basename(final)} ({progress(saved)}{note})"
+                             f" -> {self.image_folder}{f'（{how}）' if how else ''}", "success")
                 else:
                     self.log(f"第 {progress(i)} 张保存失败：微信未聚焦或默认保存目录不可访问，已停止", "error")
                     break

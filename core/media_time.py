@@ -323,24 +323,27 @@ def guess_from_path(path):
 
 def resolve_media_time(exif_path=None, message_time=None, source_path=None,
                        fallback_path=None, now=None):
-    """按证据链挑选时间，返回 ``(datetime, 来源说明)``。
+    """按证据链挑选时间，返回 ``(datetime, 来源说明, 是否推测)``。
 
     优先级：EXIF 拍摄时间 > 微信消息时间 > 源文件时间 > 路径月份推测 > 当前时间。
+
+    ``是否推测``：只有 EXIF 拍摄时间是真实时间；消息时间、落盘时间、月份推测
+    与下载时间兜底都属于推测，命名时需加 ``_dst`` 后缀区分。
     """
     if exif_path:
         t = exif_datetime(exif_path)
         if t:
-            return t, 'EXIF 拍摄时间'
+            return t, 'EXIF 拍摄时间', False
     if _valid(message_time):
-        return message_time, '微信消息时间'
+        return message_time, '微信消息时间', True
     if source_path and not is_transient_source(source_path):
         t = source_time(source_path)
         if t:
-            return t, '源文件时间'
+            return t, '源文件时间', True
     g = guess_from_path(fallback_path or source_path)
     if g:
-        return g, '按月份推测'
-    return now or datetime.now(), '下载时间'
+        return g, '按月份推测', True
+    return now or datetime.now(), '下载时间', True
 
 
 def choose_media_time(viewer_time=None, source_path=None, fallback_path=None, now=None):

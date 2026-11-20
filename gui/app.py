@@ -18,11 +18,11 @@ from core.downloader import WeChatDownloader, list_visible_windows
 from core.naming import NamingScheme
 from core.wechat_uia import (
     get_chat_info, capture_viewer_chat_name, start_viewer_watcher,
-    set_chat_name, clear_chat_name,
+    set_chat_name, clear_chat_name, diagnose_viewer, is_low_integrity,
 )
 
 
-NAMING_PRESETS = ['1001起序', '0001起序', '1起序', '日期+序号', '自定义']
+NAMING_PRESETS = ['文件日期', '1001起序', '0001起序', '1起序', '日期+序号', '自定义']
 MODE_MAP = {'剪贴板复制': 'clipboard', 'Ctrl+S 接管对话框': 'ctrl_s'}
 DIRECTIONS = ['向右', '向左']
 
@@ -39,7 +39,7 @@ class WeiXinImageToolGUI:
         self.var_count = tk.StringVar(value=str(config.DEFAULTS['download_count']))
         self.var_dl_mode = tk.StringVar(value='剪贴板复制')  # '剪贴板复制' | 'Ctrl+S 接管对话框'
         self.var_direction = tk.StringVar(value=config.DEFAULTS['nav_direction'])  # 向右 / 向左
-        self.var_naming_preset = tk.StringVar(value='1001起序')
+        self.var_naming_preset = tk.StringVar(value=config.DEFAULTS.get('naming_preset', '文件日期'))
         self.var_name_prefix = tk.StringVar(value='')
         self.var_name_start = tk.StringVar(value='1')
         self.var_name_digits = tk.StringVar(value='3')
@@ -59,6 +59,13 @@ class WeiXinImageToolGUI:
         self._build_ui()
         # 后台监视查看器：在窗口出现瞬间捕获「会话 ID -> 群名」，避免主窗口切换后误判
         start_viewer_watcher(log_cb=self._log)
+        if is_low_integrity():
+            self._log(
+                '提示：工具正以受限（低完整性）方式运行，Windows 不允许读取微信界面，'
+                '会话识别会失败。请改用普通方式启动（在资源管理器里双击 '
+                'WeChatImageTool.exe，或用普通命令行运行）。',
+                'warning',
+            )
         self._drain_log_queue()
 
     def _log(self, msg, level="info"):
@@ -289,7 +296,12 @@ class WeiXinImageToolGUI:
         try:
             scheme = self._build_naming_from_ui()
             examples = scheme.preview(3)
-            self.label_preview.configure(text="命名示例：" + ", ".join(f"{e}.jpg" for e in examples))
+            if scheme.time:
+                # 一行放不下两个完整时间名，只展示一个并提示 _dst 规则
+                text = f"命名示例：{examples[0]}.jpg（推测加 _dst，不覆盖同名）"
+            else:
+                text = "命名示例：" + ", ".join(f"{e}.jpg" for e in examples)
+            self.label_preview.configure(text=text)
         except Exception:
             self.label_preview.configure(text="命名示例：—")
 
@@ -392,7 +404,10 @@ class WeiXinImageToolGUI:
         """
         basic = self._chat_info(hwnd)
         if not basic:
-            self._log("未识别到微信图片查看器会话，请确认选中的是「图片和视频」窗口", "warning")
+            details, advice = diagnose_viewer(hwnd)
+            for line in details:
+                self._log(line, 'warning')
+            self._log(advice, 'warning')
             return None
         if reset:
             clear_chat_name(basic.get('chat_id'))

@@ -11,6 +11,9 @@
 未安装或读取失败时返回 None，调用方可以安全回退到原目录。
 """
 
+import ctypes
+import ctypes.wintypes as wt
+import os
 import re
 import threading
 from datetime import datetime
@@ -59,6 +62,70 @@ def _ensure_thread(auto):
     if not getattr(_thread_state, 'inited', False):
         auto.InitializeUIAutomationInCurrentThread()
         _thread_state.inited = True
+
+
+_TOKEN_QUERY = 0x0008
+_TOKEN_INTEGRITY_LEVEL = 25  # TokenIntegrityLevel
+_INTEGRITY_LOW_RID = 0x1000
+_INTEGRITY_MEDIUM_RID = 0x2000
+
+
+class _SidAndAttributes(ctypes.Structure):
+    _fields_ = [('Sid', ctypes.c_void_p), ('Attributes', wt.DWORD)]
+
+
+class _TokenMandatoryLabel(ctypes.Structure):
+    _fields_ = [('Label', _SidAndAttributes)]
+
+
+def process_integrity_rid(pid=None):
+    """返回进程完整性级别 RID（0x1000 低 / 0x2000 普通 / 0x3000 高）。
+
+    读取失败返回 None。Windows 的 UIPI 会拦截低完整性进程对普通进程 UI
+    Automation 树的访问：此时只能读到窗口标题，读不到查看器的 AutomationId，
+    表现就是「未识别到微信图片查看器会话」。用它可以区分是环境受限还是
+    微信版本改了界面结构。
+    """
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    advapi32 = ctypes.WinDLL('advapi32', use_last_error=True)
+    target = os.getpid() if pid is None else int(pid)
+    process = kernel32.OpenProcess(0x1000, False, target)  # QUERY_LIMITED_INFORMATION
+    if not process:
+        return None
+    token = wt.HANDLE()
+    try:
+        if not advapi32.OpenProcessToken(process, _TOKEN_QUERY, ctypes.byref(token)):
+            return None
+        size = wt.DWORD()
+        advapi32.GetTokenInformation(
+            token, _TOKEN_INTEGRITY_LEVEL, None, 0, ctypes.byref(size))
+        if not size.value:
+            return None
+        buffer = ctypes.create_string_buffer(size.value)
+        if not advapi32.GetTokenInformation(
+                token, _TOKEN_INTEGRITY_LEVEL, buffer, size, ctypes.byref(size)):
+            return None
+        label = ctypes.cast(buffer, ctypes.POINTER(_TokenMandatoryLabel)).contents
+        if not label.Label.Sid:
+            return None
+        count = ctypes.cast(label.Label.Sid, ctypes.POINTER(ctypes.c_ubyte))[1]
+        sub_authority = ctypes.cast(
+            ctypes.c_void_p(label.Label.Sid + 8),
+            ctypes.POINTER(ctypes.c_uint),
+        )[count - 1]
+        return int(sub_authority)
+    except Exception:
+        return None
+    finally:
+        if token:
+            kernel32.CloseHandle(token)
+        kernel32.CloseHandle(process)
+
+
+def is_low_integrity(pid=None):
+    """本进程是否以低完整性（受限/沙箱）方式运行。"""
+    rid = process_integrity_rid(pid)
+    return rid is not None and rid < _INTEGRITY_MEDIUM_RID
 
 
 def set_chat_name(chat_id, name):
@@ -119,6 +186,37 @@ def parse_viewer_message_time(automation_id):
         except (OverflowError, OSError, ValueError):
             return None
     return None
+
+
+def _find_preview_chat_id(element, max_depth=8, max_nodes=300):
+    """在查看器子树里查找含 ``PreviewWindow_`` 的 AutomationId。
+
+    个别微信版本把查看器的 AutomationId 挂在子节点而不是根节点上，
+    根节点解析不到会话 ID 时用它兜底。找不到返回空字符串。
+    """
+    stack = [(element, 0)]
+    visited = 0
+    while stack and visited < max_nodes:
+        current, depth = stack.pop()
+        if depth > max_depth:
+            continue
+        visited += 1
+        try:
+            value = current.AutomationId or ''
+        except Exception:
+            value = ''
+        index = value.find('PreviewWindow_')
+        if index >= 0:
+            chat_id = parse_viewer_chat_id(value[index:])
+            if chat_id:
+                return chat_id
+        try:
+            children = current.GetChildren()
+        except Exception:
+            children = []
+        for child in children:
+            stack.append((child, depth + 1))
+    return ''
 
 
 def read_viewer_chat_id(hwnd):
@@ -257,6 +355,12 @@ def _info_from_viewer(auto, viewer_hwnd, read_current=False, force_current=False
     except Exception:
         return None
     if not chat_id:
+        # 有的微信版本把 AutomationId 挂在子节点上，根节点读不到时兜底搜索一次
+        try:
+            chat_id = _find_preview_chat_id(viewer)
+        except Exception:
+            chat_id = ''
+    if not chat_id:
         return None
 
     viewer_tid, pid = win32process.GetWindowThreadProcessId(viewer_hwnd)
@@ -339,6 +443,70 @@ def get_chat_info(hwnd, read_current=False, force_current=False):
 def capture_viewer_chat_name(hwnd, force=False):
     """读取主窗口当前会话名并缓存；force=True 时覆盖已有缓存"""
     return get_chat_info(hwnd, read_current=True, force_current=force)
+
+
+def diagnose_viewer(hwnd):
+    """识别失败时收集原因，返回 ``(细节行列表, 处理建议)``。"""
+    details = []
+    rid = process_integrity_rid()
+    if rid is None:
+        details.append('工具进程完整性：读取失败')
+    else:
+        level = {0x1000: '低（受限/沙箱）', 0x2000: '普通', 0x3000: '高'}.get(rid, f'0x{rid:04x}')
+        details.append(f'工具进程完整性：{level}（RID=0x{rid:04x}）')
+
+    try:
+        title = win32gui.GetWindowText(hwnd) or ''
+    except Exception:
+        title = ''
+    details.append(f'所选窗口：{title or "（无标题）"}，hwnd={hwnd}')
+
+    auto = _load_uia()
+    child_count = None
+    children_readable = False
+    if auto is None:
+        details.append('uiautomation 未安装或加载失败')
+    else:
+        try:
+            _ensure_thread(auto)
+            viewer = auto.ControlFromHandle(hwnd)
+            if viewer is None:
+                details.append('UIA 读取窗口失败（ControlFromHandle 返回空）')
+            else:
+                children = viewer.GetChildren()
+                names = [child.ControlTypeName for child in children]
+                child_count = len(children)
+                details.append(
+                    f'UIA 根节点：ClassName={viewer.ClassName!r}，'
+                    f'AutomationId={viewer.AutomationId!r}，'
+                    f'直接子节点 {child_count} 个（{", ".join(names) or "无"}）'
+                )
+                # 只拿到一个 TitleBar 是 Windows 给「不可读窗口」的兜底代理
+                children_readable = bool(children) and not (
+                    child_count == 1 and names[0] == 'TitleBarControl')
+        except Exception as e:
+            details.append(f'UIA 读取失败：{type(e).__name__}: {e}')
+
+    if rid is not None and rid < _INTEGRITY_MEDIUM_RID:
+        advice = (
+            '工具当前以受限（低完整性）方式运行，Windows 不允许它读取微信界面。'
+            '请关闭本窗口，改用普通方式启动：在资源管理器里双击 WeChatImageTool.exe，'
+            '或在普通命令提示符里运行；不要在受限终端/沙箱中启动。'
+        )
+    elif child_count is not None and not children_readable:
+        advice = (
+            '窗口可读但读不到内部控件：请确认微信与工具处于同一权限级别'
+            '（不要一个用管理员身份、一个用普通身份），并保持「图片和视频」查看器打开；'
+            '仍然失败请把上面的窗口信息反馈给开发者。'
+        )
+    elif children_readable:
+        advice = (
+            '界面可读，但没找到会话 ID：微信版本可能改了 AutomationId 格式，'
+            '请把上面的窗口信息反馈给开发者。'
+        )
+    else:
+        advice = '请确认选中的是「图片和视频」窗口，并先在微信里打开一张图片再重试。'
+    return details, advice
 
 
 def _find_button(root, name, max_depth=12):
