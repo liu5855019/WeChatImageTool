@@ -15,11 +15,11 @@ from PIL import Image, ImageGrab
 
 import config
 from config import IMAGE_EXTS, VIDEO_EXTS
-from core import file_ops
+from core import file_ops, media_time
 from core.naming import NamingScheme, compute_start
 from core.wechat_uia import (
     get_chat_info, sanitize_folder_name, is_nav_disabled,
-    click_view_original_button,
+    click_view_original_button, read_viewer_chat_id, find_viewer_window,
 )
 
 
@@ -51,11 +51,11 @@ class WeChatDownloader:
     def __init__(self, image_folder, count, wechat_save_src=None,
                  direction='向右', naming=None, start_index=1001, log_cb=None, stop_event=None,
                  selected_hwnd=None, mode='ctrl_s', use_chat_folder=True,
-                 download_original_video=True):
+                 download_original_video=True, apply_media_time=True):
         self.image_folder = image_folder
         self.base_image_folder = image_folder
         self.count = count
-        self.wechat_save_src = wechat_save_src  # 可选：微信默认保存目录
+        self.wechat_save_src = wechat_save_src or config.DEFAULTS.get('wechat_save_src')  # 微信默认保存目录
         # 切图方向同时决定按哪个方向键、以及检查哪个导航按钮是否到边界
         self.direction = direction if direction in self.DIRECTION_KEYS else '向右'
         self.next_key = self.DIRECTION_KEYS[self.direction]
@@ -68,6 +68,10 @@ class WeChatDownloader:
         self.mode = mode  # 'ctrl_s' | 'clipboard'
         self.use_chat_folder = use_chat_folder  # 是否按微信会话名建子文件夹
         self.download_original_video = download_original_video  # 视频优先下载原文件
+        self.apply_media_time = apply_media_time  # 下载后写入拍摄/消息时间
+        self._last_time = None  # 上一张写入的时间，用于日志
+        self.chat_id = ''       # 当前会话 ID（用于定位 .dat 反查消息时间）
+        self.wechat_root = None  # 微信账号根目录（Ctrl+S 模式定位 .dat 用）
         self.chat_name = ''
         self.window_title = config.GUI_CONF.get('window_title', '微信图片下载工具')
         self._last_src = None  # 上一张成功保存的剪贴板源路径（用于排除残留）
@@ -544,6 +548,9 @@ class WeChatDownloader:
                     return False, None, None
             if kind == 'files':
                 src = data[0]
+                # 压缩版（微信落盘）时间 = 消息时间；原视频 _raw 是刚点出来的，
+                # 时间会是“现在”，所以时间戳一律以压缩版为准。
+                time_src = src
                 ext = os.path.splitext(src)[1].lower() or '.png'
                 # 视频：优先拿「查看原视频」的原文件，失败则回退压缩版
                 if self.download_original_video and ext in VIDEO_EXTS:
@@ -560,7 +567,8 @@ class WeChatDownloader:
                     file_ops.ensure_writable(target)
                     shutil.copy2(src, target)
                     file_ops.ensure_writable(target)
-                    return True, ext, src
+                    # 返回压缩版路径供写入时间/排除残留
+                    return True, ext, time_src
                 except Exception as e:
                     self.log(f"复制文件失败：{e}", "warning")
                     return False, None, None
@@ -602,6 +610,7 @@ class WeChatDownloader:
 
         name = (info.get('name') or '').strip()
         chat_id = info.get('chat_id') or ''
+        self.chat_id = chat_id or self.chat_id
         kind = '群聊' if info.get('is_group') else '联系人'
         if not name:
             self.log(
@@ -627,9 +636,83 @@ class WeChatDownloader:
             return hwnd
 
         self.chat_name = name
+        self.chat_id = chat_id or self.chat_id
         self.image_folder = target
         self.log(f"已识别会话：{name}（{kind}），保存到子文件夹「{safe}」", "input")
         return hwnd
+
+    def _media_time_context(self, hwnd):
+        """准备时间反查所需的会话 ID 与微信账号根目录（一次即可）。"""
+        if not self.apply_media_time or (self.chat_id and self.wechat_root):
+            return
+        try:
+            if not self.chat_id:
+                for cand in (self.active_hwnd, hwnd):
+                    cid = read_viewer_chat_id(cand) if cand else ''
+                    if cid:
+                        self.chat_id = cid
+                        break
+            if not self.chat_id:
+                viewer = find_viewer_window()
+                if viewer:
+                    self.chat_id = read_viewer_chat_id(viewer)
+            if self.chat_id and not self.wechat_root:
+                self.wechat_root = media_time.find_account_root(
+                    self.wechat_save_src, self.chat_id)
+        except Exception:
+            pass
+        if self.chat_id:
+            self.log(
+                f"时间来源：会话 {self.chat_id}，"
+                f"{'已定位' if self.wechat_root else '未定位'}微信数据目录"
+                f"{'（可用 EXIF / 消息时间）' if self.wechat_root else '（仅能用文件时间/月份推测）'}",
+                "info",
+            )
+        else:
+            self.log("未识别到会话 ID，无法反查消息时间，将用文件时间/月份推测", "warning")
+
+    def _stamp_media_time(self, target, source_path=None, copy_start=None, is_image=None):
+        """把下载后的文件时间写成拍摄/消息时间（修改 + 创建时间）。
+
+        证据链：EXIF 拍摄时间 > 微信消息时间 > 源文件时间 > 路径月份推测 > 当前时间。
+        失败只记日志，不影响下载主流程。
+        """
+        if not self.apply_media_time:
+            return None
+        if not target or not os.path.exists(target):
+            return None
+        try:
+            if copy_start is None:
+                copy_start = time.time()
+            if is_image is None:
+                is_image = media_time.is_image_path(source_path or target)
+            # 原图解码出来的临时 jpg 才可能带 EXIF
+            exif_path = source_path if (is_image and source_path and media_time.is_image_path(source_path)) else None
+            message_time, msg_detail = None, ''
+            if is_image:
+                if source_path and media_time.is_transient_source(source_path):
+                    # 临时目录的月份是“解码当月”，不能用来限定范围，必须全量扫
+                    message_time, msg_detail = media_time.dat_message_evidence(
+                        self.wechat_root, self.chat_id, month=None, after_ts=copy_start)
+                elif not source_path and self.mode == 'ctrl_s':
+                    # Ctrl+S 模式：源文件未知，按“刚被谁读过”反查
+                    message_time, msg_detail = media_time.dat_message_evidence(
+                        self.wechat_root, self.chat_id, month=None, after_ts=copy_start)
+            dt, reason = media_time.resolve_media_time(
+                exif_path=exif_path, message_time=message_time,
+                source_path=source_path, fallback_path=source_path or target)
+            if reason == '微信消息时间':
+                reason = f"消息时间估算·{msg_detail}" if msg_detail else "消息时间估算"
+            elif reason == '源文件时间':
+                reason = "微信落盘时间估算"
+            if media_time.apply_file_time(target, dt):
+                self._last_time = dt
+                self.log(f"已写入时间：{dt:%Y-%m-%d %H:%M:%S}（{reason}）", "input")
+                return dt
+            self.log("写入文件时间失败（文件可能被占用）", "warning")
+        except Exception as e:
+            self.log(f"写入文件时间失败：{e}", "warning")
+        return None
 
     def run(self):
         if not self._countdown(3):
@@ -650,6 +733,10 @@ class WeChatDownloader:
 
         if self.use_chat_folder:
             hwnd = self._apply_chat_folder(hwnd)
+
+        # 用于读取消息时间的查看器句柄：优先已定位的查看器
+        time_hwnd = self.active_hwnd or hwnd
+        self._media_time_context(time_hwnd)
 
         file_ops.ensure_folder(self.image_folder)
 
@@ -683,6 +770,9 @@ class WeChatDownloader:
                     pass
             time.sleep(0.4)
 
+            # 记录本次复制/保存的开始时间，用于反查“刚被读取的 .dat”
+            copy_start = time.time()
+
             if self.mode == 'clipboard':
                 # ---------- 剪贴板模式（内部多次重发重试，偶发竞态不中断整体） ----------
                 ok, ext, src = self._clipboard_copy_image(base)
@@ -690,6 +780,8 @@ class WeChatDownloader:
                     self._last_src = src  # 记录刚保存的源路径，供下次排除残留
                     saved += 1
                     self.log(f"已保存 {base}{ext} ({progress(saved)})", "success")
+                    target = os.path.join(self.image_folder, f"{base}{ext}")
+                    self._stamp_media_time(target, src, copy_start)
                 else:
                     self.log(f"第 {base} 张多次重试仍失败，跳过并继续下一张", "error")
 
@@ -743,6 +835,7 @@ class WeChatDownloader:
 
                 if saved_this:
                     saved += 1
+                    self._stamp_media_time(real, None, copy_start)
                 else:
                     self.log(f"第 {progress(i)} 张保存失败：微信未聚焦或默认保存目录不可访问，已停止", "error")
                     break

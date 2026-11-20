@@ -45,6 +45,7 @@ class WeiXinImageToolGUI:
         self.var_name_digits = tk.StringVar(value='3')
         self.var_chat_folder = tk.BooleanVar(value=True)   # 按微信会话建子文件夹
         self.var_original_video = tk.BooleanVar(value=config.DEFAULTS['download_original_video'])  # 视频下载原文件
+        self.var_media_time = tk.BooleanVar(value=config.DEFAULTS['apply_media_time'])  # 写入拍摄/消息时间
         self.selected_hwnd = None                      # 用户手动选择的微信窗口句柄
         self.var_target_window = tk.StringVar(value="未选择")
         self.var_chat_name = tk.StringVar(value="")       # 会话名（识别后可手动修正）
@@ -158,15 +159,28 @@ class WeiXinImageToolGUI:
                      font=ctk.CTkFont(size=11), text_color="#9CA3AF", anchor="w").pack(
             side="left", padx=(10, 0))
 
-        # 视频：优先下载「查看原视频」的原文件（体积较大，默认开启）
+        # 视频原文件 + 写入拍摄/消息时间（同一行）
+        opt_row = ctk.CTkFrame(card_dl.body, fg_color="transparent")
+        opt_row.pack(fill="x", pady=(0, 6))
         ctk.CTkCheckBox(
-            card_dl.body, text="视频下载原文件（点「查看原视频」，体积较大）",
+            opt_row, text="视频下载原文件（点「查看原视频」，体积较大）",
             variable=self.var_original_video,
             font=ctk.CTkFont(size=11), text_color="#6B7280",
             checkbox_width=18, checkbox_height=18, corner_radius=4,
             border_width=1, border_color="#D1D5DB",
             fg_color="#3B82F6", hover_color="#2563EB",
-        ).pack(anchor="w", pady=(0, 6))
+        ).pack(side="left")
+        ctk.CTkCheckBox(
+            opt_row, text="写入拍摄/消息时间",
+            variable=self.var_media_time,
+            font=ctk.CTkFont(size=11), text_color="#6B7280",
+            checkbox_width=18, checkbox_height=18, corner_radius=4,
+            border_width=1, border_color="#D1D5DB",
+            fg_color="#3B82F6", hover_color="#2563EB",
+        ).pack(side="left", padx=(16, 0))
+        ctk.CTkLabel(opt_row, text="优先真实拍摄时间，取不到则按消息/月份推测",
+                     font=ctk.CTkFont(size=11), text_color="#9CA3AF", anchor="w").pack(
+            side="left", padx=(8, 0))
 
         # 按会话建子文件夹 + 会话名（同一行，放在「选择微信窗口」之前）
         name_row = ctk.CTkFrame(card_dl.body, fg_color="transparent")
@@ -314,7 +328,8 @@ class WeiXinImageToolGUI:
             direction=self.var_direction.get(), naming=naming,
             log_cb=self._log, stop_event=self.stop_event, selected_hwnd=self.selected_hwnd,
             mode=dl_mode, use_chat_folder=self.var_chat_folder.get(),
-            download_original_video=self.var_original_video.get()
+            download_original_video=self.var_original_video.get(),
+            apply_media_time=self.var_media_time.get()
         )
         self.worker = threading.Thread(target=self._run_download, args=(downloader,), daemon=True)
         self.worker.start()

@@ -13,6 +13,7 @@
 
 import re
 import threading
+from datetime import datetime
 
 import win32gui
 import win32process
@@ -93,6 +94,57 @@ def parse_viewer_chat_id(automation_id):
     if automation_id.startswith('PreviewWindow_'):
         return automation_id[len('PreviewWindow_'):]
     return ''
+
+
+def parse_viewer_message_time(automation_id):
+    """从查看器 AutomationId 提取「打开查看器时那条消息」的时间，失败返回 None。
+
+    ``PreviewWindow_<chat_id>_<ts>_<n2>_<n3>_<n4>``，其中 ``<ts>`` 是消息的
+    Unix 时间戳（秒）。实测与微信落盘文件时间、所在年月文件夹一致。
+
+    注意：实测在查看器内用方向键/按钮切换图片时该值**不会变化**，它只记录
+    打开查看器时的那条消息，不能用来给每一张图单独定时间。逐张时间请用
+    ``core.media_time`` 的 EXIF / ``.dat`` 访问时间证据链。
+    """
+    if not automation_id:
+        return None
+    match = re.match(r'^PreviewWindow_.+_(\d+)_(\d+)_(\d+)_(\d+)$', automation_id)
+    if not match:
+        return None
+    ts = int(match.group(1))
+    # 合理范围 2001-01-01 ~ 2100-01-01，过滤明显不是时间的数字
+    if 978307200 <= ts <= 4102444800:
+        try:
+            return datetime.fromtimestamp(ts)
+        except (OverflowError, OSError, ValueError):
+            return None
+    return None
+
+
+def read_viewer_chat_id(hwnd):
+    """读取查看器窗口的会话 ID；失败返回空字符串。"""
+    auto = _load_uia()
+    if auto is None or not hwnd:
+        return ''
+    try:
+        _ensure_thread(auto)
+        viewer = auto.ControlFromHandle(hwnd)
+        return parse_viewer_chat_id(viewer.AutomationId or '')
+    except Exception:
+        return ''
+
+
+def read_viewer_message_time(hwnd):
+    """读取查看器「打开时那条消息」的时间；切换图片不会更新，失败返回 None。"""
+    auto = _load_uia()
+    if auto is None or not hwnd:
+        return None
+    try:
+        _ensure_thread(auto)
+        viewer = auto.ControlFromHandle(hwnd)
+        return parse_viewer_message_time(viewer.AutomationId or '')
+    except Exception:
+        return None
 
 
 def sanitize_folder_name(name, max_len=60):
