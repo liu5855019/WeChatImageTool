@@ -90,7 +90,7 @@ def default_wechat_src():
 # 功能默认值
 DEFAULTS = {
     'image_folder': default_image_folder(),
-    'download_count': 10,
+    'download_count': 0,            # 0 = 一直下载，走到当前方向边界（第一张/最后一张）才停止
     'wechat_save_src': default_wechat_src(),  # 监控来源（微信默认保存目录）
     'nav_direction': '向左',        # 切图方向：向右 / 向左（默认向左，从当前张往前下载）
     'download_original_video': True,  # 视频优先下载「查看原视频」的原文件（体积较大）

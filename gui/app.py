@@ -112,6 +112,8 @@ class WeiXinImageToolGUI:
         row_top = ctk.CTkFrame(card_dl.body, fg_color="transparent")
         row_top.pack(fill="x", pady=(0, 6))
         labeled_field(row_top, "下载数量", self.var_count, width=56)
+        ctk.CTkLabel(row_top, text="0 = 自动停止", font=ctk.CTkFont(size=11),
+                     text_color="#9CA3AF", anchor="w").pack(side="left", padx=(6, 0))
         ctk.CTkLabel(row_top, text="命名规则", font=ctk.CTkFont(size=12),
                      text_color="#6B7280").pack(side="left", padx=(12, 6))
         self.naming_om = ctk.CTkOptionMenu(

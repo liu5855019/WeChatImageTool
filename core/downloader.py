@@ -658,10 +658,18 @@ class WeChatDownloader:
         self.log(f"命名方案：{self.naming.preset}（起始序号 {self.seq}，示例：{', '.join(self.naming.preview(3))}）", "info")
 
         saved = 0
-        for i in range(self.count):
+        # count<=0 表示不限数量，一直下载到当前方向的边界（第一张/最后一张）
+        unlimited = self.count <= 0
+
+        def progress(n):
+            return f"第 {n} 张" if unlimited else f"{n}/{self.count}"
+
+        i = 0
+        while unlimited or i < self.count:
             if self.stop_event.is_set():
                 self.log("下载已停止", "warning")
                 break
+            i += 1
 
             base = self.naming.format(self.seq)
             self.seq += 1  # 无论成功失败序号都顺延（失败留空号，不中断整体）
@@ -681,7 +689,7 @@ class WeChatDownloader:
                 if ok:
                     self._last_src = src  # 记录刚保存的源路径，供下次排除残留
                     saved += 1
-                    self.log(f"已保存 {base}{ext} ({saved}/{self.count})", "success")
+                    self.log(f"已保存 {base}{ext} ({progress(saved)})", "success")
                 else:
                     self.log(f"第 {base} 张多次重试仍失败，跳过并继续下一张", "error")
 
@@ -689,7 +697,7 @@ class WeChatDownloader:
                 # ---------- Ctrl+S 模式 ----------
                 self.log(f"目标保存文件夹：{self.image_folder}", "info")
                 pyautogui.hotkey('ctrl', 's')
-                self.log(f"已发送 Ctrl+S（第 {i+1}/{self.count} 张，命名 {base}）", "info")
+                self.log(f"已发送 Ctrl+S（第 {progress(i)} 张，命名 {base}）", "info")
                 time.sleep(0.5)  # 给对话框一点弹出时间
 
                 saved_this = False
@@ -712,7 +720,7 @@ class WeChatDownloader:
                     real = target if os.path.exists(target) else self._find_saved_target(base)
                     if real and os.path.exists(real):
                         saved_this = True
-                        self.log(f"已保存 {os.path.basename(real)} ({i+1}/{self.count}) -> {self.image_folder}", "success")
+                        self.log(f"已保存 {os.path.basename(real)} ({progress(i)}) -> {self.image_folder}", "success")
                 else:
                     # 2) 找不到对话框：可能检测失败但对话框实际存在，直接 Alt+S 提交
                     #    不盲填完整路径，避免触发「文件名无效」错误。
@@ -724,19 +732,19 @@ class WeChatDownloader:
                     real = self._find_saved_target(base)
                     if real and os.path.exists(real):
                         saved_this = True
-                        self.log(f"已保存 {os.path.basename(real)} ({i+1}/{self.count}) -> {self.image_folder}", "success")
+                        self.log(f"已保存 {os.path.basename(real)} ({progress(i)}) -> {self.image_folder}", "success")
 
                 # 3) 主流程仍失败：递归扫描微信默认保存目录里最新修改的图，搬到你设的文件夹
                 if not saved_this:
                     real = self._rescue_via_monitor(base, timeout=8.0)
                     if real and os.path.exists(real):
                         saved_this = True
-                        self.log(f"已从微信默认目录搬移 {os.path.basename(real)} ({i+1}/{self.count}) -> {self.image_folder}", "success")
+                        self.log(f"已从微信默认目录搬移 {os.path.basename(real)} ({progress(i)}) -> {self.image_folder}", "success")
 
                 if saved_this:
                     saved += 1
                 else:
-                    self.log(f"第 {i+1} 张保存失败：微信未聚焦或默认保存目录不可访问，已停止", "error")
+                    self.log(f"第 {progress(i)} 张保存失败：微信未聚焦或默认保存目录不可访问，已停止", "error")
                     break
 
             # 自动结束：导航按钮被禁用说明已到当前方向的边界，不再切图
