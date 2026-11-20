@@ -4,6 +4,7 @@
 import queue
 import threading
 import tkinter as tk
+from tkinter import messagebox
 import customtkinter as ctk
 import win32con
 import win32gui
@@ -78,13 +79,14 @@ class WeiXinImageToolGUI:
         main = ctk.CTkFrame(self.root, fg_color="#F0F2F5")
         main.pack(fill="both", expand=True, padx=12, pady=12)
 
-        # 标题区
+        # 标题区（标题 + 副标题同一行）
         head = ctk.CTkFrame(main, fg_color="transparent")
         head.pack(fill="x", pady=(0, 12))
         ctk.CTkLabel(head, text=config.GUI_CONF['window_title'], font=ctk.CTkFont(size=18, weight="bold"),
-                     text_color="#1A1A1A", anchor="w").pack(anchor="w")
+                     text_color="#1A1A1A", anchor="w").pack(side="left")
         ctk.CTkLabel(head, text="保存微信图片到本地，自动命名整理",
-                     font=ctk.CTkFont(size=12), text_color="#9CA3AF", anchor="w").pack(anchor="w", pady=(2, 0))
+                     font=ctk.CTkFont(size=12), text_color="#9CA3AF", anchor="w").pack(
+            side="left", padx=(14, 0), pady=(3, 0))
 
         # 路径设置（清空文件夹按钮合并到这一行，避免右侧大片空白）
         card_path = SectionCard(main, "路径设置")
@@ -108,7 +110,7 @@ class WeiXinImageToolGUI:
         # ① 图片下载
         card_dl = SectionCard(main, "① 图片下载")
 
-        # 数量 + 命名规则
+        # 数量 + 命名规则 + 命名示例（同一行）
         row_top = ctk.CTkFrame(card_dl.body, fg_color="transparent")
         row_top.pack(fill="x", pady=(0, 6))
         labeled_field(row_top, "下载数量", self.var_count, width=56)
@@ -122,6 +124,10 @@ class WeiXinImageToolGUI:
             button_color="#E5E7EB", text_color="#374151", dropdown_fg_color="#FFFFFF",
             command=self._on_naming_change)
         self.naming_om.pack(side="left")
+        # 命名示例与命名规则同一行
+        self.label_preview = ctk.CTkLabel(row_top, text="", font=ctk.CTkFont(size=11),
+                                          text_color="#6B7280", anchor="w")
+        self.label_preview.pack(side="left", padx=(12, 0))
 
         # 自定义字段（仅「自定义」时显示）
         self.custom_frame = ctk.CTkFrame(card_dl.body, fg_color="transparent")
@@ -130,12 +136,7 @@ class WeiXinImageToolGUI:
         labeled_field(self.custom_frame, "位数(0不补零)", self.var_name_digits, width=64)
         self.custom_frame.pack_forget()
 
-        # 命名预览
-        self.label_preview = ctk.CTkLabel(card_dl.body, text="", font=ctk.CTkFont(size=11),
-                                          text_color="#6B7280", anchor="w")
-        self.label_preview.pack(anchor="w", pady=(0, 6))
-
-        # 下载方式
+        # 下载方式 + 切图方向（同一行）
         mode_row = ctk.CTkFrame(card_dl.body, fg_color="transparent")
         mode_row.pack(fill="x", pady=(0, 6))
         ctk.CTkLabel(mode_row, text="下载方式", font=ctk.CTkFont(size=12),
@@ -144,27 +145,16 @@ class WeiXinImageToolGUI:
                           width=160, height=32, corner_radius=6, fg_color="#F3F4F6",
                           button_color="#E5E7EB", text_color="#374151",
                           dropdown_fg_color="#FFFFFF").pack(side="left")
-        ctk.CTkCheckBox(
-            mode_row, text="按会话建子文件夹（自动识别群名/联系人名）",
-            variable=self.var_chat_folder,
-            font=ctk.CTkFont(size=11), text_color="#6B7280",
-            checkbox_width=18, checkbox_height=18, corner_radius=4,
-            border_width=1, border_color="#D1D5DB",
-            fg_color="#3B82F6", hover_color="#2563EB",
-        ).pack(side="left", padx=(16, 0))
-
         # 切图方向：向右从当前张往后下载，向左从当前张往前下载
-        dir_row = ctk.CTkFrame(card_dl.body, fg_color="transparent")
-        dir_row.pack(fill="x", pady=(0, 6))
-        ctk.CTkLabel(dir_row, text="切图方向", font=ctk.CTkFont(size=12),
-                     text_color="#6B7280").pack(side="left", padx=(0, 6))
+        ctk.CTkLabel(mode_row, text="切图方向", font=ctk.CTkFont(size=12),
+                     text_color="#6B7280").pack(side="left", padx=(16, 6))
         ctk.CTkOptionMenu(
-            dir_row, values=DIRECTIONS, variable=self.var_direction,
+            mode_row, values=DIRECTIONS, variable=self.var_direction,
             width=90, height=32, corner_radius=6, fg_color="#F3F4F6",
             button_color="#E5E7EB", text_color="#374151",
             dropdown_fg_color="#FFFFFF",
         ).pack(side="left")
-        ctk.CTkLabel(dir_row, text="向右=往后下载 / 向左=往前下载",
+        ctk.CTkLabel(mode_row, text="向右=往后 / 向左=往前",
                      font=ctk.CTkFont(size=11), text_color="#9CA3AF", anchor="w").pack(
             side="left", padx=(10, 0))
 
@@ -178,19 +168,19 @@ class WeiXinImageToolGUI:
             fg_color="#3B82F6", hover_color="#2563EB",
         ).pack(anchor="w", pady=(0, 6))
 
-        # 选择微信窗口（放在「开始下载」之前）
-        pick_row = ctk.CTkFrame(card_dl.body, fg_color="transparent")
-        pick_row.pack(fill="x", pady=(0, 6))
-        create_button(pick_row, "选择微信窗口", command=self._pick_window,
-                      width=120, height=34, style_type="secondary").pack(side="left")
-        ctk.CTkLabel(pick_row, textvariable=self.var_target_window, font=ctk.CTkFont(size=11),
-                     text_color="#9CA3AF", anchor="w").pack(side="left", padx=(10, 0))
-
-        # 会话名：自动识别，识别不准可直接修改（会自动记住）
+        # 按会话建子文件夹 + 会话名（同一行，放在「选择微信窗口」之前）
         name_row = ctk.CTkFrame(card_dl.body, fg_color="transparent")
         name_row.pack(fill="x", pady=(0, 6))
+        ctk.CTkCheckBox(
+            name_row, text="按会话建子文件夹",
+            variable=self.var_chat_folder,
+            font=ctk.CTkFont(size=11), text_color="#6B7280",
+            checkbox_width=18, checkbox_height=18, corner_radius=4,
+            border_width=1, border_color="#D1D5DB",
+            fg_color="#3B82F6", hover_color="#2563EB",
+        ).pack(side="left", padx=(0, 12))
         ctk.CTkLabel(name_row, text="会话名", font=ctk.CTkFont(size=12),
-                     text_color="#6B7280", width=96, anchor="w").pack(side="left", padx=(0, 8))
+                     text_color="#6B7280", anchor="w").pack(side="left", padx=(0, 8))
         self.entry_chat_name = ctk.CTkEntry(
             name_row, textvariable=self.var_chat_name, font=ctk.CTkFont(size=12),
             height=32, border_color="#E5E7EB", corner_radius=6,
@@ -201,6 +191,14 @@ class WeiXinImageToolGUI:
         self.entry_chat_name.bind("<FocusOut>", lambda _: self._save_chat_name())
         create_button(name_row, "重新识别", command=self._recapture_chat,
                       width=88, height=32, style_type="secondary").pack(side="left")
+
+        # 选择微信窗口（放在「开始下载」之前）
+        pick_row = ctk.CTkFrame(card_dl.body, fg_color="transparent")
+        pick_row.pack(fill="x", pady=(0, 6))
+        create_button(pick_row, "选择微信窗口", command=self._pick_window,
+                      width=120, height=34, style_type="secondary").pack(side="left")
+        ctk.CTkLabel(pick_row, textvariable=self.var_target_window, font=ctk.CTkFont(size=11),
+                     text_color="#9CA3AF", anchor="w").pack(side="left", padx=(10, 0))
 
         # 开始下载 / 停止
         dl_row = ctk.CTkFrame(card_dl.body, fg_color="transparent")
@@ -225,19 +223,25 @@ class WeiXinImageToolGUI:
 
         # ② 运行日志（可折叠，避免拖边框看日志）
         self.card_log = SectionCard(main, "② 运行日志")
+        # 收起/清空日志按钮放到标题行右侧，与「运行日志」同一行
+        self.btn_clear_log = create_button(
+            self.card_log.header, "清空日志", command=self._clear_log,
+            width=84, height=28, style_type="secondary")
+        self.btn_clear_log.pack(side="right", padx=(0, 8))
         self.btn_toggle_log = create_button(
-            self.card_log.body, "收起日志 ▲", command=self._toggle_log,
+            self.card_log.header, "收起日志 ▲", command=self._toggle_log,
             width=96, height=28, style_type="secondary")
-        self.btn_toggle_log.pack(anchor="w", pady=(0, 6))
+        self.btn_toggle_log.pack(side="right")
         # 固定高度容器，保证日志区始终可见（不受卡片 body 仅横向撑开的影响）
-        log_box = ctk.CTkFrame(self.card_log.body, fg_color="transparent", height=200)
-        log_box.pack(fill="x", pady=(0, 2))
-        log_box.pack_propagate(False)
-        self.log_widget = ScrolledTextSafe(log_box, height=120)
+        self.log_box = ctk.CTkFrame(self.card_log.body, fg_color="transparent", height=200)
+        self.log_box.pack(fill="x", pady=(0, 2))
+        self.log_box.pack_propagate(False)
+        self.log_widget = ScrolledTextSafe(self.log_box, height=120)
         self.log_widget.pack(fill="both", expand=True)
         self.card_log.pack(fill="x", pady=(0, 0))
 
         self._log_collapsed = False
+        self._log_expanded_height = None   # 折叠前窗口高度，用于展开时还原
         self.logger = GUILogger(self.log_widget.text_widget)
 
         self._on_naming_change(self.var_naming_preset.get())  # 初始化预览 / 自定义栏显隐
@@ -451,21 +455,48 @@ class WeiXinImageToolGUI:
         if not folder:
             self._log("请先设置图片保存文件夹", "error")
             return
+        # 删除前二次确认，避免误操作丢失图片
+        if not messagebox.askyesno(
+                "确认清空文件夹",
+                f"确定要清空以下文件夹里的所有图片吗？\n\n{folder}\n\n此操作不可撤销。",
+                parent=self.root):
+            self._log("已取消清空文件夹", "info")
+            return
         cnt = file_ops.clear_folder(folder)
         self._log(f"已清空文件夹，删除 {cnt} 张图片", "success")
 
+    def _clear_log(self):
+        """清空运行日志显示（不影响已下载文件）"""
+        self.logger.clear()
+        self._log("日志已清空", "info")
+
     def _toggle_log(self):
-        """折叠/展开运行日志卡片，省去拖拽窗口边框"""
+        """折叠/展开运行日志区，省去拖拽窗口边框。
+
+        折叠：隐藏固定高度的 log_box，并把窗口高度收掉日志区高度；
+        展开：重新显示并还原窗口高度。日志始终在后台写入，展开后可见。
+        注意 CTk 会缩放 geometry 字符串，这里用 tk.Tk.geometry 直接传实际像素，
+        避免缩放叠加导致尺寸翻倍。
+        """
+        # 收起/展开只改高度，保留当前位置（否则会跳回屏幕左上角）
+        pos = f"+{self.root.winfo_x()}+{self.root.winfo_y()}"
         if self._log_collapsed:
-            self.log_widget.pack(fill="both", expand=True)
-            self.card_log.pack(fill="x", pady=(0, 0))
+            self.log_box.pack(fill="x", pady=(0, 2))
             self.btn_toggle_log.configure(text="收起日志 ▲")
             self._log_collapsed = False
+            if self._log_expanded_height:
+                tk.Tk.geometry(
+                    self.root,
+                    f"{self.root.winfo_width()}x{self._log_expanded_height}{pos}",
+                )
         else:
-            self.log_widget.pack_forget()
-            self.card_log.pack(fill="x", pady=(0, 0))
+            self._log_expanded_height = self.root.winfo_height()
+            log_h = self.log_box.winfo_height()
+            self.log_box.pack_forget()
             self.btn_toggle_log.configure(text="展开日志 ▼")
             self._log_collapsed = True
+            new_h = max(240, self._log_expanded_height - log_h - 4)
+            tk.Tk.geometry(self.root, f"{self.root.winfo_width()}x{new_h}{pos}")
 
 
 # ScrolledText 的安全封装（暴露内部 tk.Text 给 GUILogger）

@@ -6,7 +6,9 @@ import os
 # GUI 外观配置
 GUI_CONF = {
     'window_title': '微信图片下载工具',
-    'window_geometry': '820x780',
+    # 主窗口启动位置：格式「宽x高+X+Y」，X/Y 是屏幕像素坐标（CustomTkinter 只缩放宽高，不缩放位置）
+    # 例：'+100+80' = 距屏幕左侧 100px、顶部 80px；也可用负数贴右下角，如 '-100-80'
+    'window_geometry': '820x780+100+100',
     'window_resizable': True,
     'appearance_mode': 'Light',
     'color_theme': 'blue',

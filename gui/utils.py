@@ -80,6 +80,9 @@ class ScrolledText:
     def pack(self, **kwargs):
         self.frame.pack(**kwargs)
 
+    def pack_forget(self):
+        self.frame.pack_forget()
+
     def grid(self, **kwargs):
         self.frame.grid(**kwargs)
 

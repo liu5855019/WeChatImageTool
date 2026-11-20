@@ -12,9 +12,11 @@ class SectionCard(ctk.CTkFrame):
     def __init__(self, master, title, **kwargs):
         super().__init__(master, fg_color="#FFFFFF", border_width=1,
                          border_color="#E5E7EB", corner_radius=10, **kwargs)
-        ctk.CTkLabel(self, text=title, font=ctk.CTkFont(size=14, weight="bold"),
-                     text_color="#374151", anchor="w").pack(
-            anchor="w", padx=16, pady=(12, 8))
+        # 标题行：标题在左，右侧可放操作按钮（如「收起日志」「清空日志」）
+        self.header = ctk.CTkFrame(self, fg_color="transparent")
+        self.header.pack(fill="x", padx=16, pady=(12, 8))
+        ctk.CTkLabel(self.header, text=title, font=ctk.CTkFont(size=14, weight="bold"),
+                     text_color="#374151", anchor="w").pack(side="left")
         self.body = ctk.CTkFrame(self, fg_color="transparent")
         self.body.pack(fill="x", padx=16, pady=(0, 14))
 
