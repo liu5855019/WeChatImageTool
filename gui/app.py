@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """主界面：构建窗口、卡片、日志区，并绑定核心逻辑（后台线程）"""
 
+import os
 import queue
 import threading
 import tkinter as tk
@@ -121,6 +122,7 @@ class WeiXinImageToolGUI:
             if p:
                 self.var_img_folder.set(p)
         create_button(path_row, "浏览", command=_browse_folder, width=72, height=32).pack(side="left", padx=(0, 8))
+        create_button(path_row, "打开", command=self._open_folder, width=64, height=32).pack(side="left", padx=(0, 8))
         create_button(path_row, "清空文件夹", command=self._clear_folder,
                       width=96, height=32, style_type="warning").pack(side="left")
         card_path.pack(fill="x", pady=(0, 10))
@@ -489,6 +491,19 @@ class WeiXinImageToolGUI:
     def _stop_download(self):
         self.stop_event.set()
         self._log("正在停止…", "warning")
+
+    def _open_folder(self):
+        """在文件资源管理器中打开图片保存文件夹；不存在时自动创建。"""
+        folder = self.var_img_folder.get().strip()
+        if not folder:
+            self._log("请先设置图片保存文件夹", "error")
+            return
+        try:
+            os.makedirs(folder, exist_ok=True)
+            os.startfile(folder)
+            self._log(f"已打开文件夹：{folder}", "info")
+        except Exception as e:
+            self._log(f"打开文件夹失败：{e}", "error")
 
     def _clear_folder(self):
         folder = self.var_img_folder.get().strip()
