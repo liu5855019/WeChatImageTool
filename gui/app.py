@@ -67,6 +67,16 @@ class WeiXinImageToolGUI:
                 'warning',
             )
         self._drain_log_queue()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self):
+        """关闭窗口：通知后台线程停止，并落盘日志文件。"""
+        self.stop_event.set()
+        try:
+            self.logger.close()
+        except Exception:
+            pass
+        self.root.destroy()
 
     def _log(self, msg, level="info"):
         """任意线程可调用；先入队，再由主线程定时写入 Text，保证 tkinter 线程安全"""
