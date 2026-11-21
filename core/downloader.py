@@ -3,6 +3,7 @@
 
 import io
 import os
+import random
 import shutil
 import time
 import threading
@@ -11,6 +12,7 @@ import pyautogui
 import win32gui
 import win32con
 import win32clipboard
+import win32process
 from PIL import Image, ImageGrab
 
 import config
@@ -18,9 +20,9 @@ from config import IMAGE_EXTS, VIDEO_EXTS
 from core import file_ops, media_time
 from core.naming import NamingScheme, compute_start, unique_path
 from core.wechat_uia import (
-    get_chat_info, sanitize_folder_name, is_nav_disabled,
-    click_view_original_button, read_viewer_chat_id, find_viewer_window,
-    is_low_integrity,
+    get_chat_info, sanitize_folder_name, is_nav_disabled, is_save_disabled,
+    is_image_expired, click_view_original_button, read_viewer_chat_id,
+    find_viewer_window, is_low_integrity,
 )
 
 
@@ -48,6 +50,18 @@ class WeChatDownloader:
     """
 
     DIRECTION_KEYS = {'向右': 'right', '向左': 'left'}
+
+    # 类人操作节奏（秒）：固定间隔是明显的机器特征，微信服务端风控会据此识别脚本。
+    # 用随机区间替代写死的 sleep，并小概率插入较长停顿。
+    # 间隔刻意偏大：截图/复制节奏越慢越接近真人，降低服务端风控风险。
+    DELAY_AFTER_FOCUS = (0.8, 2.0)     # 抢回焦点后
+    DELAY_BEFORE_CTRLC = (0.4, 1.0)    # 按 Ctrl+C 前
+    DELAY_RETRY = (0.8, 2.0)           # 重试间隔
+    DELAY_AFTER_NAV = (1.5, 3.5)       # 切图后等渲染
+    DELAY_POLL = (0.15, 0.35)          # 轮询剪贴板
+    DELAY_CONFIRM = (0.3, 0.7)         # 过期信号二次确认间隔
+    IDLE_CHANCE = 0.12                 # 偶尔"发呆"的概率
+    IDLE_RANGE = (3.0, 8.0)            # 发呆时长
 
     def __init__(self, image_folder, count, wechat_save_src=None,
                  direction='向右', naming=None, start_index=1001, log_cb=None, stop_event=None,
@@ -77,6 +91,7 @@ class WeChatDownloader:
         self.chat_name = ''
         self.window_title = config.GUI_CONF.get('window_title', '微信图片下载工具')
         self._last_src = None  # 上一张成功保存的剪贴板源路径（用于排除残留）
+        self._last_image_fp = None  # 上一张剪贴板图片的指纹（用于排除残留位图）
         self.active_hwnd = None  # 实际用于置顶/聚焦的微信窗口句柄
         self.seq = start_index  # 当前序号（运行期递增）
 
@@ -87,6 +102,100 @@ class WeChatDownloader:
             self.log(f"倒计时 {i} 秒，请现在用鼠标点击微信图片查看器窗口，使其置顶并保持焦点…", "warning")
             time.sleep(1)
         return True
+
+    # ------------------------------------------------------------------
+    # 类人操作：随机节奏 + 按需抢焦点 + 剪贴板变化检测
+    # 目的：打破固定间隔/每张强制置顶/每张清空剪贴板这些机器特征，降低服务端风控风险
+    # ------------------------------------------------------------------
+    def _human_pause(self, rng):
+        """按 rng=(min,max) 随机等待；stop_event 置位时立即返回。"""
+        self.stop_event.wait(random.uniform(*rng))
+
+    def _maybe_idle(self):
+        """小概率插入一次较长停顿，模拟真人偶尔分心。"""
+        if random.random() < self.IDLE_CHANCE:
+            self._human_pause(self.IDLE_RANGE)
+
+    def _ensure_focus(self, hwnd):
+        """仅在目标窗口确实不在前台时才抢焦点，避免每张图都 SetForegroundWindow。"""
+        if not hwnd:
+            return
+        try:
+            fg = win32gui.GetForegroundWindow()
+            if fg == hwnd:
+                return
+            target_pid = win32process.GetWindowThreadProcessId(hwnd)[1]
+            fg_pid = win32process.GetWindowThreadProcessId(fg)[1]
+            if fg_pid and fg_pid == target_pid:
+                return
+        except Exception:
+            pass
+        try:
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            win32gui.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
+
+    def _save_button_unavailable(self, hwnd):
+        """「保存」按钮二次确认为禁用 -> 疑似图片过期，提前跳过。
+
+        读不到状态（None）、或两次结果不一致（Qt 状态晚一拍）都返回 False，
+        让流程照常复制，避免因识别不可靠误跳正常图片。
+        """
+        if not hwnd:
+            return False
+        try:
+            first = is_save_disabled(hwnd)
+            if first is not True:
+                return False
+            self._human_pause(self.DELAY_CONFIRM)
+            second = is_save_disabled(hwnd)
+            return second is True
+        except Exception:
+            return False
+
+    def _image_unavailable(self, hwnd):
+        """综合判断当前图片是否过期/被清理（用于提前跳过，省掉 4 次 Ctrl+C 重试）。
+
+        信号优先级：
+          1) UIA 文字“图片已过期或被清理” —— 最可靠，二次确认后判定；
+          2) 「保存」按钮禁用 —— 回退信号，同样二次确认。
+
+        任何一步读不到或两次结果不一致都返回 False（照常复制），避免误跳正常图。
+        """
+        if not hwnd:
+            return False
+        try:
+            first = is_image_expired(hwnd)
+            if first is True:
+                self._human_pause(self.DELAY_CONFIRM)
+                if is_image_expired(hwnd) is True:
+                    return True
+                # 文字两次不一致（Qt 状态晚一拍）——继续用按钮信号判定
+            return self._save_button_unavailable(hwnd)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _clipboard_fingerprint(kind, data):
+        """给剪贴板内容算轻量指纹，用于判断 Ctrl+C 后内容是否真的变了。"""
+        if kind == 'files':
+            return ('files', tuple(data))
+        if kind == 'image':
+            w, h = min(8, data.width), min(8, data.height)
+            return ('image', data.size, data.mode, data.crop((0, 0, w, h)).tobytes())
+        return (kind, None)
+
+    def _init_clipboard_baseline(self):
+        """记录启动前的剪贴板内容，避免把旧内容误判为新复制的图。"""
+        try:
+            kind, data = self._read_clipboard_image()
+        except Exception:
+            return
+        if kind == 'image':
+            self._last_image_fp = self._clipboard_fingerprint(kind, data)
+        elif kind == 'files' and data:
+            self._last_src = data[0]
 
     def _capture_foreground(self):
         try:
@@ -452,20 +561,25 @@ class WeChatDownloader:
         return (None, None)
 
     def _wait_clipboard_ready(self, timeout=3.0, exclude=None):
-        """Ctrl+C 后轮询剪贴板，直到出现图片数据；exclude 用于排除上一张的残留路径"""
+        """Ctrl+C 后轮询剪贴板，直到出现"新"图片数据。
+
+        不再每张都清空剪贴板（那是明显的机器行为）：路径用 exclude 排除残留，
+        位图用指纹排除残留；只有内容真的变化才认为是本次 Ctrl+C 的结果。
+        """
         deadline = time.time() + timeout
         while time.time() < deadline:
             if self.stop_event.is_set():
                 return (None, None)
             kind, data = self._read_clipboard_image()
             if kind == 'image':
-                return (kind, data)
-            if kind == 'files':
+                if self._clipboard_fingerprint(kind, data) != self._last_image_fp:
+                    return (kind, data)
+            elif kind == 'files':
                 src = data[0]
                 if src != exclude:
                     return (kind, data)
                 # 仍是上一张残留，继续等微信写入新路径
-            time.sleep(0.15)
+            self._human_pause(self.DELAY_POLL)
         return (None, None)
 
     def _get_original_video(self, compressed_src, timeout=12.0):
@@ -520,18 +634,9 @@ class WeChatDownloader:
             if self.stop_event.is_set():
                 return False, None, None
 
-            # 每次尝试前重新抢回微信窗口焦点，避免焦点漂移导致 Ctrl+C 落空
-            # active_hwnd 可能是自动纠正后的图片查看器，优先于用户手选的窗口
-            focus_hwnd = self.active_hwnd or self.selected_hwnd
-            if focus_hwnd:
-                try:
-                    win32gui.ShowWindow(focus_hwnd, win32con.SW_RESTORE)
-                    win32gui.SetForegroundWindow(focus_hwnd)
-                except Exception:
-                    pass
-
-            self._clear_clipboard()
-            time.sleep(0.08)
+            # 只在焦点确实不在微信时才抢；不再每张都清空剪贴板
+            self._ensure_focus(self.active_hwnd or self.selected_hwnd)
+            self._human_pause(self.DELAY_BEFORE_CTRLC)
             pyautogui.hotkey('ctrl', 'c')
             if attempt == 1:
                 self.log(f"已发送 Ctrl+C（第 {base} 张）", "info")
@@ -540,6 +645,7 @@ class WeChatDownloader:
 
             kind, data = self._wait_clipboard_ready(timeout=2.0, exclude=self._last_src)
             if kind == 'image':
+                self._last_image_fp = self._clipboard_fingerprint(kind, data)
                 target = os.path.join(self.image_folder, f"{base}.png")
                 try:
                     file_ops.ensure_writable(target)
@@ -575,9 +681,9 @@ class WeChatDownloader:
                     self.log(f"复制文件失败：{e}", "warning")
                     return False, None, None
 
-            # 剪贴板未就绪，短暂等待后重发（除非已是最后一次）
+            # 剪贴板未就绪，随机短等待后重发（除非已是最后一次）
             if attempt < max_attempts:
-                time.sleep(0.3)
+                self._human_pause(self.DELAY_RETRY)
 
         return False, None, None
 
@@ -788,6 +894,10 @@ class WeChatDownloader:
         time_hwnd = self.active_hwnd or hwnd
         self._media_time_context(time_hwnd)
 
+        # 记录启动前的剪贴板内容作为基线，避免把旧内容误判为新复制的图
+        self._init_clipboard_baseline()
+        self.log("已启用类人操作节奏（随机间隔 / 按需聚焦 / 不清空剪贴板），降低风控风险", "info")
+
         file_ops.ensure_folder(self.image_folder)
 
         # 根据命名方案计算实际起始序号（避免覆盖文件夹已有同名文件）
@@ -803,6 +913,7 @@ class WeChatDownloader:
                      f"示例：{', '.join(self.naming.preview(3))}）", "info")
 
         saved = 0
+        skipped_expired = 0  # 因过期提示/按钮禁用而提前跳过的疑似过期图数量
         # count<=0 表示不限数量，一直下载到当前方向的边界（第一张/最后一张）
         unlimited = self.count <= 0
 
@@ -823,21 +934,25 @@ class WeChatDownloader:
                 base = self.naming.format(self.seq)
             self.seq += 1  # 无论成功失败序号都顺延（失败留空号，不中断整体）
 
-            # 确保微信查看器有焦点
-            if hwnd:
-                try:
-                    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-                    win32gui.SetForegroundWindow(hwnd)
-                except Exception:
-                    pass
-            time.sleep(0.4)
+            # 只在焦点确实不在微信时才抢，并随机停顿（打破固定间隔的机器特征）
+            self._ensure_focus(hwnd)
+            self._human_pause(self.DELAY_AFTER_FOCUS)
+            self._maybe_idle()
 
             # 记录本次复制/保存的开始时间，用于反查“刚被读取的 .dat”
             copy_start = time.time()
 
             if self.mode == 'clipboard':
                 # ---------- 剪贴板模式（内部多次重发重试，偶发竞态不中断整体） ----------
-                ok, ext, src = self._clipboard_copy_image(base)
+                # 提前检查过期信号（优先 UIA 文字提示，回退到「保存」按钮状态）：
+                # 过期/被清理的图片直接跳过，省掉 4 次 Ctrl+C 重试的等待。
+                # 检查不可靠时照常复制。
+                if self._image_unavailable(hwnd):
+                    self.log(f"第 {progress(i)} 张检测到图片已过期/被清理，跳过", "warning")
+                    skipped_expired += 1
+                    ok = False  # 跳过复制，但仍走后面的边界检查 + 切图
+                else:
+                    ok, ext, src = self._clipboard_copy_image(base)
                 if ok:
                     self._last_src = src  # 记录刚保存的源路径，供下次排除残留
                     saved += 1
@@ -919,8 +1034,12 @@ class WeChatDownloader:
             except Exception:
                 pass
 
-            # 切到下一张
+            # 切到下一张，随机等待渲染，偶尔发呆
             pyautogui.press(self.next_key)
-            time.sleep(0.6)
+            self._human_pause(self.DELAY_AFTER_NAV)
+            self._maybe_idle()
 
-        self.log(f"下载完成，共保存 {saved} 张图片到 {self.image_folder}", "success")
+        summary = f"下载完成，共保存 {saved} 张图片到 {self.image_folder}"
+        if skipped_expired:
+            summary += f"（另有 {skipped_expired} 张疑似过期被跳过）"
+        self.log(summary, "success")

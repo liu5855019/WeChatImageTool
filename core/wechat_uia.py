@@ -579,6 +579,87 @@ def is_next_disabled(hwnd):
     return is_nav_disabled(hwnd, 'right')
 
 
+def is_save_disabled(hwnd):
+    """查看器「保存」按钮是否已禁用（用于提前识别过期/被清理的图片）。
+
+    三态返回：
+      True  —— 明确禁用（疑似图片已过期）
+      False —— 明确可用
+      None  —— 读不到（按钮不存在 / 不是查看器 / UIA 异常）
+
+    调用方只在 ``True`` 时跳过，读不到一律照常 Ctrl+C，避免因识别失败误跳。
+    """
+    auto = _load_uia()
+    if auto is None or not hwnd:
+        return None
+    try:
+        _ensure_thread(auto)
+        viewer = _viewer_control(auto, hwnd)
+        if viewer is None:
+            return None
+        button = _find_button(viewer, '保存')
+        if button is None:
+            return None
+        try:
+            return not bool(button.IsEnabled)
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+# 图片过期/被清理时查看器里出现的提示文字关键字。
+# 用多个候选兼容不同微信版本的文案（如「图片已过期或被清理」「该图片已过期」等）。
+_EXPIRED_KEYWORDS = ('已过期', '过期或被清理', '已被清理', '图片已清理',
+                     '已删除', '无法查看', '不存在')
+
+
+def _find_expired_text(root, max_depth=18):
+    """在 UIA 树里找含“过期/清理”提示的文字节点，返回其 Name；找不到返回 None。"""
+    stack = [(root, 0)]
+    while stack:
+        el, depth = stack.pop()
+        if depth > max_depth:
+            continue
+        try:
+            name = (el.Name or '').strip()
+            if name and any(k in name for k in _EXPIRED_KEYWORDS):
+                return name
+        except Exception:
+            pass
+        try:
+            for child in el.GetChildren():
+                stack.append((child, depth + 1))
+        except Exception:
+            pass
+    return None
+
+
+def is_image_expired(hwnd):
+    """查看器里是否显示“图片已过期或被清理”等提示文字。
+
+    三态返回：
+      True  —— 明确读到过期提示文字（最可靠的过期信号）
+      False —— UIA 树可读，但没找到提示文字
+      None  —— 读不到（不是查看器 / UIA 异常）
+
+    该文字若是 Qt 自绘在图片区域而非 TextControl，则 UIA 读不到（返回 False），
+    此时调用方应回退到「保存」按钮状态等其它信号。
+    """
+    auto = _load_uia()
+    if auto is None or not hwnd:
+        return None
+    try:
+        _ensure_thread(auto)
+        viewer = _viewer_control(auto, hwnd)
+        if viewer is None:
+            return None
+        text = _find_expired_text(viewer)
+        return text is not None
+    except Exception:
+        return None
+
+
 def _find_button_by_prefix(root, prefix, max_depth=14):
     """按名字前缀找按钮（「查看原视频」按钮名带大小，如「查看原视频(3.1M)」）"""
     stack = [(root, 0)]
